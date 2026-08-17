@@ -72,6 +72,10 @@ SEC_HEADERS = {
 
 SESSION = requests.Session()
 
+# Máxima idade aceita para o trimestre fundamental atual.
+# Evita usar silenciosamente fundamentos antigos como se fossem atuais.
+MAX_FUNDAMENTAL_AGE_DAYS = 400
+
 
 # =============================================================================
 # 2. TAGS XBRL
@@ -1151,108 +1155,107 @@ def _eps_quarter_yoy(
 def _latest_common_quarter(
     revenue_q: pd.DataFrame,
     eps_q: pd.DataFrame,
+    as_of_date=None,
+    max_age_days: int = MAX_FUNDAMENTAL_AGE_DAYS,
 ) -> Optional[tuple[int, str]]:
     """
-    Receita e EPS precisam referir-se
-    ao MESMO trimestre fiscal.
+    Localiza o trimestre fiscal mais recente que seja realmente utilizável.
+
+    Requisitos:
+    - receita e EPS pertencem ao MESMO trimestre fiscal;
+    - o mesmo trimestre do ano anterior existe para receita;
+    - o mesmo trimestre do ano anterior existe para EPS;
+    - o período atual não pode estar excessivamente antigo.
+
+    Se não houver trimestre recente e comparável, retorna None.
     """
 
-    if (
-        revenue_q.empty
-        or
-        eps_q.empty
-    ):
-
+    if revenue_q.empty or eps_q.empty:
         return None
 
-    rev_keys = set(
-        zip(
-            revenue_q[
-                "fiscal_year"
-            ].astype(int),
+    if as_of_date is None:
+        ref_date = pd.Timestamp.utcnow()
+        if ref_date.tzinfo is not None:
+            ref_date = ref_date.tz_localize(None)
+        ref_date = ref_date.normalize()
+    else:
+        ref_date = pd.Timestamp(as_of_date)
+        if ref_date.tzinfo is not None:
+            ref_date = ref_date.tz_localize(None)
+        ref_date = ref_date.normalize()
 
-            revenue_q[
-                "quarter"
-            ],
-        )
+    rev = revenue_q.copy()
+    eps = eps_q.copy()
+
+    rev["fiscal_year"] = pd.to_numeric(
+        rev["fiscal_year"],
+        errors="coerce",
+    )
+    eps["fiscal_year"] = pd.to_numeric(
+        eps["fiscal_year"],
+        errors="coerce",
     )
 
-    eps_keys = set(
-        zip(
-            eps_q[
-                "fiscal_year"
-            ].astype(int),
+    rev = rev.dropna(subset=["fiscal_year", "quarter", "end"])
+    eps = eps.dropna(subset=["fiscal_year", "quarter", "end"])
 
-            eps_q[
-                "quarter"
-            ],
-        )
-    )
-
-    common = (
-        rev_keys
-        &
-        eps_keys
-    )
-
-    if not common:
+    if rev.empty or eps.empty:
         return None
+
+    rev["fiscal_year"] = rev["fiscal_year"].astype(int)
+    eps["fiscal_year"] = eps["fiscal_year"].astype(int)
+
+    rev_keys = set(zip(rev["fiscal_year"], rev["quarter"]))
+    eps_keys = set(zip(eps["fiscal_year"], eps["quarter"]))
+
+    current_common = rev_keys & eps_keys
 
     candidates = []
 
-    for fiscal_year, quarter in common:
+    for fiscal_year, quarter in current_common:
+        # Exige comparativo do mesmo trimestre no ano fiscal anterior
+        prev_key = (int(fiscal_year) - 1, quarter)
 
-        rev = revenue_q[
-            (
-                revenue_q[
-                    "fiscal_year"
-                ]
-                ==
-                fiscal_year
-            )
-            &
-            (
-                revenue_q[
-                    "quarter"
-                ]
-                ==
-                quarter
-            )
-        ]
-
-        eps = eps_q[
-            (
-                eps_q[
-                    "fiscal_year"
-                ]
-                ==
-                fiscal_year
-            )
-            &
-            (
-                eps_q[
-                    "quarter"
-                ]
-                ==
-                quarter
-            )
-        ]
-
-        if (
-            rev.empty
-            or
-            eps.empty
-        ):
+        if prev_key not in rev_keys or prev_key not in eps_keys:
             continue
 
+        rev_current = rev[
+            (rev["fiscal_year"] == fiscal_year)
+            & (rev["quarter"] == quarter)
+        ]
+
+        eps_current = eps[
+            (eps["fiscal_year"] == fiscal_year)
+            & (eps["quarter"] == quarter)
+        ]
+
+        if rev_current.empty or eps_current.empty:
+            continue
+
+        # Usa o menor end entre receita e EPS para ser conservador
         period_end = min(
-            rev.iloc[-1]["end"],
-            eps.iloc[-1]["end"],
+            pd.Timestamp(rev_current.iloc[-1]["end"]),
+            pd.Timestamp(eps_current.iloc[-1]["end"]),
         )
+
+        age_days = (ref_date - period_end.normalize()).days
+
+        # Não aceita período no futuro nem fundamentos velhos demais
+        if age_days < 0 or age_days > max_age_days:
+            continue
+
+        # Data de filing mais recente entre os dois componentes
+        filed_dates = []
+        for frame in (rev_current, eps_current):
+            if "filed" in frame.columns and pd.notna(frame.iloc[-1]["filed"]):
+                filed_dates.append(pd.Timestamp(frame.iloc[-1]["filed"]))
+
+        latest_filed = max(filed_dates) if filed_dates else pd.Timestamp.min
 
         candidates.append(
             (
                 period_end,
+                latest_filed,
                 int(fiscal_year),
                 str(quarter),
             )
@@ -1261,18 +1264,13 @@ def _latest_common_quarter(
     if not candidates:
         return None
 
-    candidates.sort(
-        key=lambda x: x[0]
-    )
+    # Prioridade absoluta para o período econômico mais recente.
+    # Filing serve apenas como desempate.
+    candidates.sort(key=lambda x: (x[0], x[1]))
 
-    _, fiscal_year, quarter = (
-        candidates[-1]
-    )
+    _, _, fiscal_year, quarter = candidates[-1]
 
-    return (
-        fiscal_year,
-        quarter,
-    )
+    return fiscal_year, quarter
 
 
 # =============================================================================
@@ -1408,6 +1406,7 @@ def analyze_company_fundamentals(
         _latest_common_quarter(
             revenue_q,
             eps_q,
+            as_of_date=as_of_date,
         )
     )
 
@@ -1449,6 +1448,12 @@ def analyze_company_fundamentals(
 
             "eps_tag":
                 eps_tag,
+
+            "fundamental_age_days":
+                np.nan,
+
+            "fundamental_recent":
+                False,
 
             "growth_class":
                 "SEM_DADOS",
@@ -1517,6 +1522,35 @@ def analyze_company_fundamentals(
             periods
         )
 
+    if period_end is not None:
+
+        if as_of_date is None:
+            ref_date = pd.Timestamp.utcnow()
+            if ref_date.tzinfo is not None:
+                ref_date = ref_date.tz_localize(None)
+            ref_date = ref_date.normalize()
+        else:
+            ref_date = pd.Timestamp(as_of_date)
+            if ref_date.tzinfo is not None:
+                ref_date = ref_date.tz_localize(None)
+            ref_date = ref_date.normalize()
+
+        fundamental_age_days = (
+            ref_date - pd.Timestamp(period_end).normalize()
+        ).days
+
+    else:
+        fundamental_age_days = np.nan
+
+    fundamental_recent = (
+        pd.notna(fundamental_age_days)
+        and 0 <= fundamental_age_days <= MAX_FUNDAMENTAL_AGE_DAYS
+    )
+
+    # Fail-safe adicional: fundamentos velhos nunca podem ser aprovados.
+    if not fundamental_recent:
+        classification = "SEM_DADOS"
+
     return {
         "ticker":
             ticker,
@@ -1553,6 +1587,12 @@ def analyze_company_fundamentals(
 
         "eps_tag":
             eps_tag,
+
+        "fundamental_age_days":
+            fundamental_age_days,
+
+        "fundamental_recent":
+            bool(fundamental_recent),
 
         "growth_class":
             classification,
@@ -1596,7 +1636,7 @@ def analyze_fundamentals(
         "GROWTH OPPORTUNITY ENGINE"
     )
     print(
-        "ANÁLISE FUNDAMENTAL — SEC | TRIMESTRES DISCRETOS"
+        "ANÁLISE FUNDAMENTAL — SEC | TRIMESTRES DISCRETOS + RECÊNCIA"
     )
     print("=" * 90)
 
@@ -1688,8 +1728,16 @@ def analyze_fundamentals(
                 else "N/A"
             )
 
+            age = result.get("fundamental_age_days", np.nan)
+            age_text = (
+                f"{int(age)}d"
+                if pd.notna(age)
+                else "N/A"
+            )
+
             print(
                 f"✅ {period_text} | "
+                f"idade {age_text} | "
                 f"Receita {rev_text} | "
                 f"EPS {eps_text} | "
                 f"{result['eps_state']} | "
