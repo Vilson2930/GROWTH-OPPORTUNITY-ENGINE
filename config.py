@@ -170,7 +170,7 @@ UNIVERSE = [
 # 6. DADOS DE MERCADO
 # =============================================================================
 
-PRICE_PERIOD = "3y"
+PRICE_PERIOD = "max"
 
 PRICE_INTERVAL = "1d"
 
