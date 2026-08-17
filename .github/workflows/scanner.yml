@@ -94,7 +94,21 @@ jobs:
           echo "Arquivos principais validados."
 
       # ============================================================
-      # 8. SALVAR COMO ARTIFACT
+      # 8. ENVIAR RELATÓRIO POR E-MAIL
+      # ============================================================
+
+      - name: Send report by email
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: "587"
+        run: |
+          python send_email.py
+
+      # ============================================================
+      # 9. SALVAR COMO ARTIFACT
       # ============================================================
 
       - name: Upload report artifact
@@ -107,7 +121,7 @@ jobs:
           retention-days: 30
 
       # ============================================================
-      # 9. ATUALIZAR HISTÓRICO NO REPOSITÓRIO
+      # 10. ATUALIZAR HISTÓRICO NO REPOSITÓRIO
       # ============================================================
 
       - name: Commit history
