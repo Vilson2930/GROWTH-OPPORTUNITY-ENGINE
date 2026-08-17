@@ -7,9 +7,9 @@
 # 1. Configuração
 # 2. Dados de mercado
 # 3. Fundamentos
-# 4. Sinais
-# 5. Estratégia
-# 6. Ranking operacional
+# 4. Smart Money / Institucional
+# 5. Sinais
+# 6. Estratégia
 # 7. Relatórios
 # =============================================================================
 
@@ -35,6 +35,10 @@ from engine.data import (
 
 from engine.fundamentals import (
     analyze_fundamentals,
+)
+
+from engine.institutional import (
+    analyze_institutional,
 )
 
 from engine.signals import (
@@ -241,6 +245,7 @@ def print_top_opportunities(
         "revenue_yoy",
         "eps_growth_yoy",
         "falling_score",
+        "institutional_score",
         "confirmations_total",
         "dist_sma50",
         "volume_ratio",
@@ -343,7 +348,7 @@ def run_engine():
     # =========================================================================
 
     print("\n" + "=" * 90)
-    print("ETAPA 1/5 — DADOS DE MERCADO")
+    print("ETAPA 1/6 — DADOS DE MERCADO")
     print("=" * 90)
 
     market_data = (
@@ -364,7 +369,7 @@ def run_engine():
     # =========================================================================
 
     print("\n" + "=" * 90)
-    print("ETAPA 2/5 — FUNDAMENTOS")
+    print("ETAPA 2/6 — FUNDAMENTOS")
     print("=" * 90)
 
     fundamentals = (
@@ -381,27 +386,55 @@ def run_engine():
         )
 
     # =========================================================================
-    # ETAPA 3 — SINAIS
+    # ETAPA 3 — SMART MONEY / INSTITUCIONAL
     # =========================================================================
 
     print("\n" + "=" * 90)
-    print("ETAPA 3/5 — SINAIS")
+    print("ETAPA 3/6 — SMART MONEY / INSTITUCIONAL")
     print("=" * 90)
 
-    # -------------------------------------------------------------
-    # IMPORTANTE:
-    #
-    # Neste primeiro pipeline,
-    # institutional_scores=None.
-    #
-    # Assim que criarmos a camada institucional,
-    # basta passá-la aqui.
-    # -------------------------------------------------------------
+    institutional_scores = (
+        analyze_institutional(
+            market_data
+        )
+    )
+
+    if institutional_scores.empty:
+
+        print(
+            "⚠️ Nenhum score institucional foi obtido."
+        )
+
+    else:
+
+        print(
+            f"Scores institucionais calculados: "
+            f"{len(institutional_scores)}"
+        )
+
+        confirmed = (
+            institutional_scores[
+                "institutional_score"
+            ] >= 2
+        ).sum()
+
+        print(
+            f"Com score institucional >=2: "
+            f"{confirmed}"
+        )
+
+    # =========================================================================
+    # ETAPA 4 — SINAIS
+    # =========================================================================
+
+    print("\n" + "=" * 90)
+    print("ETAPA 4/6 — SINAIS")
+    print("=" * 90)
 
     signal_table = (
         build_full_signal_table(
             market_data=market_data,
-            institutional_scores=None,
+            institutional_scores=institutional_scores,
         )
     )
 
@@ -422,11 +455,11 @@ def run_engine():
     )
 
     # =========================================================================
-    # ETAPA 4 — ESTRATÉGIA
+    # ETAPA 5 — ESTRATÉGIA
     # =========================================================================
 
     print("\n" + "=" * 90)
-    print("ETAPA 4/5 — ESTRATÉGIA")
+    print("ETAPA 5/6 — ESTRATÉGIA")
     print("=" * 90)
 
     strategy_table = apply_strategy(
@@ -456,11 +489,11 @@ def run_engine():
     )
 
     # =========================================================================
-    # ETAPA 5 — RELATÓRIOS
+    # ETAPA 6 — RELATÓRIOS
     # =========================================================================
 
     print("\n" + "=" * 90)
-    print("ETAPA 5/5 — RELATÓRIOS")
+    print("ETAPA 6/6 — RELATÓRIOS")
     print("=" * 90)
 
     outputs = generate_reports(
@@ -499,6 +532,9 @@ def run_engine():
 
         "fundamentals":
             fundamentals,
+
+        "institutional":
+            institutional_scores,
 
         "signals":
             signal_table,
