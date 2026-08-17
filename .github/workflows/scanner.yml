@@ -1,1 +1,125 @@
+name: Growth Opportunity Engine
 
+on:
+  workflow_dispatch:
+
+  schedule:
+    # Segunda a sexta, 23:30 UTC
+    # Aproximadamente 20:30 no horário de Brasília
+    - cron: "30 23 * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  run-engine:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # 1. BAIXAR REPOSITÓRIO
+      # ============================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. PYTHON
+      # ============================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ============================================================
+      # 3. INSTALAR DEPENDÊNCIAS
+      # ============================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ============================================================
+      # 4. CRIAR DIRETÓRIOS
+      # ============================================================
+
+      - name: Prepare folders
+        run: |
+          mkdir -p data
+          mkdir -p output
+
+      # ============================================================
+      # 5. EXECUTAR ENGINE
+      # ============================================================
+
+      - name: Run Growth Opportunity Engine
+        run: |
+          python main.py
+
+      # ============================================================
+      # 6. MOSTRAR RESULTADOS
+      # ============================================================
+
+      - name: Show generated files
+        if: always()
+        run: |
+          echo "===== OUTPUT ====="
+          ls -lah output || true
+
+          echo ""
+          echo "===== DATA ====="
+          ls -lah data || true
+
+      # ============================================================
+      # 7. VALIDAR RESULTADOS
+      # ============================================================
+
+      - name: Validate output
+        run: |
+          if [ ! -f "output/opportunities.csv" ]; then
+            echo "ERRO: opportunities.csv não foi gerado."
+            exit 1
+          fi
+
+          if [ ! -f "output/report.pdf" ]; then
+            echo "ERRO: report.pdf não foi gerado."
+            exit 1
+          fi
+
+          echo "Arquivos principais validados."
+
+      # ============================================================
+      # 8. SALVAR COMO ARTIFACT
+      # ============================================================
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: growth-opportunity-report
+          path: |
+            output/opportunities.csv
+            output/report.pdf
+          retention-days: 30
+
+      # ============================================================
+      # 9. ATUALIZAR HISTÓRICO NO REPOSITÓRIO
+      # ============================================================
+
+      - name: Commit history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/history.csv output/opportunities.csv || true
+
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração para salvar."
+          else
+            git commit -m "Update Growth Opportunity Engine results"
+            git push
+          fi
