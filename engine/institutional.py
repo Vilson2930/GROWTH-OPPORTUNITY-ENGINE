@@ -4,11 +4,17 @@
 #
 # Smart Money / Institutional Confirmation Engine
 #
-# Objetivo:
-# gerar um Institutional Score simples, auditável e baseado
-# apenas em dados disponíveis até o momento atual.
+# Reprodução fiel da CÉLULA 12 do estudo.
 #
-# O score é usado como CONFIRMAÇÃO.
+# Sinais:
+# 1. Volume anormal
+# 2. Absorção
+# 3. Acumulação
+# 4. OBV
+# 5. Divergência preço/volume
+# 6. Reversão curta
+#
+# O Institutional Score é usado como CONFIRMAÇÃO.
 # NÃO é filtro eliminatório.
 # =============================================================================
 
@@ -21,60 +27,48 @@ import pandas as pd
 
 
 # =============================================================================
-# 1. INDICADORES INSTITUCIONAIS
-#
-# A lógica segue a linha validada no estudo:
-#
-# - volume acima da média
-# - acumulação
-# - OBV
-# - divergência
-# - reversão
-#
-# Cada sinal verdadeiro soma +1.
-# =============================================================================
-
-
-def _calculate_obv(df: pd.DataFrame) -> pd.Series:
-    """
-    On Balance Volume.
-    """
-
-    direction = np.sign(
-        df["Close"].diff()
-    )
-
-    direction = direction.fillna(0)
-
-    obv = (
-        direction
-        *
-        df["Volume"]
-    ).cumsum()
-
-    return obv
-
-
-# =============================================================================
-# 2. PREPARAR HISTÓRICO
+# 1. PREPARAR INDICADORES
 # =============================================================================
 
 def add_institutional_indicators(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Adiciona indicadores institucionais ao histórico.
+    Reproduz os indicadores utilizados na Célula 12.
     """
 
     data = df.copy()
 
     # -------------------------------------------------------------------------
-    # VOLUME RELATIVO
+    # Preço utilizado
+    #
+    # data.py já utiliza preços ajustados via auto_adjust=True.
+    # Portanto Close é o equivalente operacional ao PX do estudo.
     # -------------------------------------------------------------------------
 
-    volume_mean_20 = (
+    data["PX"] = data["Close"]
+
+    # -------------------------------------------------------------------------
+    # RETORNO 1D
+    # -------------------------------------------------------------------------
+
+    data["ret_1d"] = (
+        data["PX"]
+        .pct_change(
+            fill_method=None
+        )
+    )
+
+    # -------------------------------------------------------------------------
+    # VOLUME MÉDIO 20
+    #
+    # IMPORTANTE:
+    # A célula 12 original incluía o próprio dia na média.
+    # Mantemos exatamente essa lógica.
+    # -------------------------------------------------------------------------
+
+    data["vol_med_20"] = (
         data["Volume"]
-        .shift(1)
         .rolling(
             20,
             min_periods=20,
@@ -82,31 +76,96 @@ def add_institutional_indicators(
         .mean()
     )
 
-    data[
-        "inst_volume_ratio"
-    ] = (
+    data["vol_ratio"] = (
         data["Volume"]
         /
-        volume_mean_20
+        data["vol_med_20"]
+    )
+
+    # -------------------------------------------------------------------------
+    # DOLLAR VOLUME
+    # Mantido por equivalência com o estudo.
+    # -------------------------------------------------------------------------
+
+    data["dollar_volume"] = (
+        data["Close"]
+        *
+        data["Volume"]
+    )
+
+    data["dollar_vol_med20"] = (
+        data["dollar_volume"]
+        .rolling(
+            20,
+            min_periods=20,
+        )
+        .mean()
+    )
+
+    # -------------------------------------------------------------------------
+    # CLOSE LOCATION
+    # -------------------------------------------------------------------------
+
+    amplitude = (
+        data["High"]
+        -
+        data["Low"]
+    ).replace(
+        0,
+        np.nan,
+    )
+
+    data["close_location_inst"] = (
+        (
+            data["Close"]
+            -
+            data["Low"]
+        )
+        /
+        amplitude
     )
 
     # -------------------------------------------------------------------------
     # OBV
     # -------------------------------------------------------------------------
 
-    data[
-        "obv"
-    ] = _calculate_obv(
-        data
-    )
+    direction = np.sign(
+        data["PX"].diff()
+    ).fillna(0)
 
-    data[
-        "obv_ma20"
-    ] = (
-        data["obv"]
+    data["OBV"] = (
+        direction
+        *
+        data["Volume"]
+    ).cumsum()
+
+    data["OBV_MA20"] = (
+        data["OBV"]
         .rolling(
             20,
             min_periods=20,
+        )
+        .mean()
+    )
+
+    # -------------------------------------------------------------------------
+    # SMA20 / SMA50
+    # -------------------------------------------------------------------------
+
+    data["SMA20_INST"] = (
+        data["PX"]
+        .rolling(
+            20,
+            min_periods=20,
+        )
+        .mean()
+    )
+
+    data["SMA50_INST"] = (
+        data["PX"]
+        .rolling(
+            50,
+            min_periods=50,
         )
         .mean()
     )
@@ -115,241 +174,281 @@ def add_institutional_indicators(
     # RETORNOS
     # -------------------------------------------------------------------------
 
-    data[
-        "ret_5d_inst"
-    ] = (
-        data["Close"]
+    data["ret_5d_inst"] = (
+        data["PX"]
         .pct_change(
             5,
             fill_method=None,
         )
     )
 
-    data[
-        "ret_20d_inst"
-    ] = (
-        data["Close"]
+    data["ret_20d_inst"] = (
+        data["PX"]
         .pct_change(
             20,
             fill_method=None,
         )
     )
 
-    # -------------------------------------------------------------------------
-    # CLOSE LOCATION
-    # -------------------------------------------------------------------------
-
-    candle_range = (
-        data["High"]
-        -
-        data["Low"]
-    )
-
-    data[
-        "inst_close_location"
-    ] = np.where(
-        candle_range > 0,
-        (
-            data["Close"]
-            -
-            data["Low"]
-        )
-        /
-        candle_range,
-        0.5,
-    )
-
-    # -------------------------------------------------------------------------
-    # ACUMULAÇÃO
-    #
-    # Dia de acumulação:
-    # fechamento positivo + volume acima da média.
-    # -------------------------------------------------------------------------
-
-    data[
-        "accumulation_day"
-    ] = (
-        (
-            data["Close"]
-            >
-            data["Close"].shift(1)
-        )
-        &
-        (
-            data["inst_volume_ratio"]
-            >= 1.20
-        )
-    )
-
-    data[
-        "accumulation_days_10"
-    ] = (
-        data[
-            "accumulation_day"
-        ]
-        .rolling(
-            10,
-            min_periods=1,
-        )
-        .sum()
-    )
-
     return data
 
 
 # =============================================================================
-# 3. SINAIS
+# 2. CALCULAR SINAIS — CÉLULA 12
 # =============================================================================
 
 def calculate_institutional_signals(
-    row: pd.Series,
+    hist: pd.DataFrame,
 ) -> Dict[str, object]:
     """
-    Calcula sinais institucionais para o último pregão.
+    Calcula os 6 sinais usando somente
+    informações existentes até o último dia de hist.
     """
 
-    volume_ratio = row.get(
-        "inst_volume_ratio",
-        np.nan,
-    )
+    if hist is None or len(hist) < 60:
 
-    accumulation_days = row.get(
-        "accumulation_days_10",
-        np.nan,
-    )
+        return {
+            "institutional_score": np.nan,
+            "institutional_class": "SEM_DADOS",
+        }
 
-    obv = row.get(
-        "obv",
-        np.nan,
-    )
+    atual = hist.iloc[-1]
 
-    obv_ma20 = row.get(
-        "obv_ma20",
-        np.nan,
-    )
+    ult10 = hist.tail(10)
 
-    ret5 = row.get(
-        "ret_5d_inst",
-        np.nan,
-    )
+    volume_ratio = atual[
+        "vol_ratio"
+    ]
 
-    ret20 = row.get(
-        "ret_20d_inst",
-        np.nan,
-    )
+    close_location = atual[
+        "close_location_inst"
+    ]
 
-    close_location = row.get(
-        "inst_close_location",
-        np.nan,
-    )
+    # =========================================================================
+    # SINAL 1 — VOLUME ANORMAL
+    # =========================================================================
 
-    # -------------------------------------------------------------------------
-    # 1. VOLUME
-    # -------------------------------------------------------------------------
-
-    signal_volume = (
+    sinal_volume = (
         pd.notna(volume_ratio)
         and
         volume_ratio >= 1.30
     )
 
-    # -------------------------------------------------------------------------
-    # 2. ACUMULAÇÃO
-    # -------------------------------------------------------------------------
-
-    signal_accumulation = (
-        pd.notna(accumulation_days)
-        and
-        accumulation_days >= 2
-    )
-
-    # -------------------------------------------------------------------------
-    # 3. OBV
-    # -------------------------------------------------------------------------
-
-    signal_obv = (
-        pd.notna(obv)
-        and
-        pd.notna(obv_ma20)
-        and
-        obv > obv_ma20
-    )
-
-    # -------------------------------------------------------------------------
-    # 4. DIVERGÊNCIA
+    # =========================================================================
+    # SINAL 2 — ABSORÇÃO
     #
-    # preço caiu em 20d, mas OBV está acima da média.
-    # -------------------------------------------------------------------------
+    # Volume >= 1,20x
+    # +
+    # fechamento na parte superior do candle.
+    # =========================================================================
 
-    signal_divergence = (
-        pd.notna(ret20)
+    sinal_absorcao = (
+        pd.notna(volume_ratio)
         and
-        ret20 < 0
-        and
-        signal_obv
-    )
-
-    # -------------------------------------------------------------------------
-    # 5. REVERSÃO
-    #
-    # curto prazo positivo após queda de 20d,
-    # fechando na metade superior do candle.
-    # -------------------------------------------------------------------------
-
-    signal_reversal = (
-        pd.notna(ret5)
-        and
-        pd.notna(ret20)
+        volume_ratio >= 1.20
         and
         pd.notna(close_location)
-        and
-        ret20 < 0
-        and
-        ret5 > 0
         and
         close_location >= 0.60
     )
 
-    score = sum(
-        [
-            int(signal_volume),
-            int(signal_accumulation),
-            int(signal_obv),
-            int(signal_divergence),
-            int(signal_reversal),
-        ]
+    # =========================================================================
+    # SINAL 3 — ACUMULAÇÃO
+    #
+    # Nos últimos 10 pregões:
+    # retorno positivo + volume relativo >1,10.
+    # =========================================================================
+
+    accumulation_days = (
+        (
+            (
+                ult10["ret_1d"]
+                >
+                0
+            )
+            &
+            (
+                ult10["vol_ratio"]
+                >
+                1.10
+            )
+        )
+        .sum()
     )
 
+    sinal_acumulacao = (
+        accumulation_days
+        >=
+        2
+    )
+
+    # =========================================================================
+    # SINAL 4 — OBV
+    # =========================================================================
+
+    sinal_obv = (
+        pd.notna(
+            atual["OBV"]
+        )
+        and
+        pd.notna(
+            atual["OBV_MA20"]
+        )
+        and
+        atual["OBV"]
+        >
+        atual["OBV_MA20"]
+    )
+
+    # =========================================================================
+    # SINAL 5 — DIVERGÊNCIA PREÇO / VOLUME
+    #
+    # Preço caiu em aproximadamente 20 pregões
+    # e OBV melhorou.
+    # =========================================================================
+
+    sinal_divergencia = False
+
+    preco_change = np.nan
+    obv_change = np.nan
+
+    if len(hist) >= 21:
+
+        inicio20 = hist.iloc[-21]
+
+        preco_change = (
+            atual["PX"]
+            /
+            inicio20["PX"]
+            -
+            1
+        )
+
+        obv_change = (
+            atual["OBV"]
+            -
+            inicio20["OBV"]
+        )
+
+        sinal_divergencia = (
+            preco_change < 0
+            and
+            obv_change > 0
+        )
+
+    # =========================================================================
+    # SINAL 6 — REVERSÃO CURTA
+    #
+    # ret20 < 0
+    # ret5 > 0
+    # =========================================================================
+
+    ret5 = atual[
+        "ret_5d_inst"
+    ]
+
+    ret20 = atual[
+        "ret_20d_inst"
+    ]
+
+    sinal_reversao = (
+        pd.notna(ret5)
+        and
+        pd.notna(ret20)
+        and
+        ret20 < 0
+        and
+        ret5 > 0
+    )
+
+    # =========================================================================
+    # SCORE INSTITUCIONAL
+    # =========================================================================
+
+    score = (
+        int(sinal_volume)
+        +
+        int(sinal_absorcao)
+        +
+        int(sinal_acumulacao)
+        +
+        int(sinal_obv)
+        +
+        int(sinal_divergencia)
+        +
+        int(sinal_reversao)
+    )
+
+    # =========================================================================
+    # CLASSE
+    # =========================================================================
+
+    if score >= 4:
+
+        classe = "FORTE"
+
+    elif score >= 2:
+
+        classe = "MODERADO"
+
+    else:
+
+        classe = "FRACO"
+
     return {
-        "signal_volume":
-            signal_volume,
-
-        "signal_accumulation":
-            signal_accumulation,
-
-        "signal_obv":
-            signal_obv,
-
-        "signal_divergence":
-            signal_divergence,
-
-        "signal_reversal":
-            signal_reversal,
-
         "institutional_score":
             int(score),
+
+        "institutional_class":
+            classe,
+
+        "institutional_volume_ratio":
+            float(volume_ratio)
+            if pd.notna(volume_ratio)
+            else np.nan,
+
+        "accumulation_days_10":
+            int(accumulation_days),
+
+        "signal_volume":
+            bool(sinal_volume),
+
+        "signal_absorption":
+            bool(sinal_absorcao),
+
+        "signal_accumulation":
+            bool(sinal_acumulacao),
+
+        "signal_obv":
+            bool(sinal_obv),
+
+        "signal_divergence":
+            bool(sinal_divergencia),
+
+        "signal_reversal":
+            bool(sinal_reversao),
+
+        "price_change_20d":
+            float(preco_change)
+            if pd.notna(preco_change)
+            else np.nan,
+
+        "obv_change_20d":
+            float(obv_change)
+            if pd.notna(obv_change)
+            else np.nan,
     }
 
 
 # =============================================================================
-# 4. ANALISAR EMPRESA
+# 3. ANALISAR UM TICKER
 # =============================================================================
 
 def analyze_ticker_institutional(
     df: pd.DataFrame,
 ) -> dict | None:
     """
-    Analisa somente o último pregão válido.
+    Analisa o último pregão disponível.
     """
 
     if df is None or df.empty:
@@ -360,81 +459,44 @@ def analyze_ticker_institutional(
     )
 
     required = [
-        "inst_volume_ratio",
-        "obv",
-        "obv_ma20",
+        "vol_ratio",
+        "OBV",
+        "OBV_MA20",
         "ret_5d_inst",
         "ret_20d_inst",
-        "inst_close_location",
+        "close_location_inst",
     ]
 
     valid = data.dropna(
         subset=required
     )
 
-    if valid.empty:
+    if len(valid) < 60:
         return None
 
-    row = valid.iloc[-1]
-
-    signals = (
+    result = (
         calculate_institutional_signals(
-            row
+            valid
         )
     )
 
-    return {
-        "date":
-            valid.index[-1],
+    if pd.isna(
+        result.get(
+            "institutional_score",
+            np.nan,
+        )
+    ):
+        return None
 
-        "institutional_score":
-            signals[
-                "institutional_score"
-            ],
+    result[
+        "date"
+    ] = valid.index[-1]
 
-        "signal_volume":
-            signals[
-                "signal_volume"
-            ],
-
-        "signal_accumulation":
-            signals[
-                "signal_accumulation"
-            ],
-
-        "signal_obv":
-            signals[
-                "signal_obv"
-            ],
-
-        "signal_divergence":
-            signals[
-                "signal_divergence"
-            ],
-
-        "signal_reversal":
-            signals[
-                "signal_reversal"
-            ],
-
-        "institutional_volume_ratio":
-            float(
-                row[
-                    "inst_volume_ratio"
-                ]
-            ),
-
-        "accumulation_days_10":
-            float(
-                row[
-                    "accumulation_days_10"
-                ]
-            ),
-    }
+    return result
 
 
 # =============================================================================
-# 5. ANALISAR UNIVERSO
+# 4. ANALISAR UNIVERSO
 # =============================================================================
 
 def analyze_institutional(
@@ -444,19 +506,19 @@ def analyze_institutional(
     ],
 ) -> pd.DataFrame:
     """
-    Analisa Smart Money em todo o universo.
+    Analisa Smart Money de todo o universo.
     """
 
     rows = []
 
-    print("=" * 80)
+    print("=" * 90)
     print(
         "GROWTH OPPORTUNITY ENGINE"
     )
     print(
-        "SMART MONEY / INSTITUCIONAL"
+        "SMART MONEY / INSTITUCIONAL — MODELO CÉLULA 12"
     )
-    print("=" * 80)
+    print("=" * 90)
 
     total = len(
         market_data
@@ -496,7 +558,8 @@ def analyze_institutional(
         print(
             f"[{i:>3}/{total}] "
             f"{ticker:<8} "
-            f"Score {result['institutional_score']}"
+            f"Score {result['institutional_score']} | "
+            f"{result['institutional_class']}"
         )
 
     result_df = pd.DataFrame(
@@ -509,20 +572,28 @@ def analyze_institutional(
             "ticker",
             "date",
             "institutional_score",
+            "institutional_class",
             "signal_volume",
+            "signal_absorption",
             "signal_accumulation",
             "signal_obv",
             "signal_divergence",
             "signal_reversal",
             "institutional_volume_ratio",
             "accumulation_days_10",
+            "price_change_20d",
+            "obv_change_20d",
         ]
 
         result_df = result_df[
-            columns_order
+            [
+                col
+                for col in columns_order
+                if col in result_df.columns
+            ]
         ]
 
-    print("-" * 80)
+    print("-" * 90)
 
     print(
         f"Empresas analisadas: "
@@ -534,7 +605,17 @@ def analyze_institutional(
         confirmed = (
             result_df[
                 "institutional_score"
-            ] >= 2
+            ]
+            >=
+            2
+        ).sum()
+
+        strong = (
+            result_df[
+                "institutional_score"
+            ]
+            >=
+            4
         ).sum()
 
         print(
@@ -542,13 +623,18 @@ def analyze_institutional(
             f"{confirmed}"
         )
 
-    print("=" * 80)
+        print(
+            f"Score institucional >=4: "
+            f"{strong}"
+        )
+
+    print("=" * 90)
 
     return result_df
 
 
 # =============================================================================
-# 6. TESTE LOCAL
+# 5. TESTE LOCAL
 # =============================================================================
 
 if __name__ == "__main__":
