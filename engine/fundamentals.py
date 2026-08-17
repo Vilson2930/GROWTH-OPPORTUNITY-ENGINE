@@ -83,14 +83,23 @@ MAX_FUNDAMENTAL_AGE_DAYS = 400
 
 REVENUE_TAGS = [
     "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "RevenueFromContractWithCustomerIncludingAssessedTax",
     "SalesRevenueNet",
+    "SalesRevenueGoodsNet",
+    "SalesRevenueServicesNet",
     "Revenues",
+    "OperatingRevenues",
+    "TotalRevenuesAndOtherIncome",
+    "InterestAndDividendIncomeOperating",
 ]
 
 EPS_TAGS = [
     "EarningsPerShareDiluted",
     "EarningsPerShareBasicAndDiluted",
     "EarningsPerShareBasic",
+    "IncomeLossFromContinuingOperationsPerDilutedShare",
+    "IncomeLossFromContinuingOperationsPerBasicAndDilutedShare",
+    "IncomeLossFromContinuingOperationsPerBasicShare",
 ]
 
 
@@ -201,25 +210,44 @@ def _find_fact(
     tags: list[str],
 ) -> tuple[Optional[dict], Optional[str]]:
     """
-    Retorna a primeira tag existente.
+    Seleciona a tag XBRL com melhor cobertura recente.
+    Evita escolher uma tag antiga apenas porque aparece primeiro.
     """
+    facts = companyfacts.get("facts", {}).get("us-gaap", {})
 
-    facts = (
-        companyfacts
-        .get("facts", {})
-        .get("us-gaap", {})
-    )
+    best_fact = None
+    best_tag = None
+    best_score = None
 
-    for tag in tags:
+    for priority, tag in enumerate(tags):
+        fact = facts.get(tag)
+        if not fact:
+            continue
 
-        if tag in facts:
+        observations = []
+        for values in fact.get("units", {}).values():
+            if isinstance(values, list):
+                observations.extend(values)
 
-            return (
-                facts[tag],
-                tag,
-            )
+        if not observations:
+            continue
 
-    return None, None
+        df = pd.DataFrame(observations)
+        if df.empty or "end" not in df.columns:
+            continue
+
+        ends = pd.to_datetime(df["end"], errors="coerce").dropna()
+        if ends.empty:
+            continue
+
+        score = (ends.max().value, len(ends), -priority)
+
+        if best_score is None or score > best_score:
+            best_score = score
+            best_fact = fact
+            best_tag = tag
+
+    return best_fact, best_tag
 
 
 # =============================================================================
