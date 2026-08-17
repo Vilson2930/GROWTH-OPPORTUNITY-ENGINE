@@ -44,6 +44,7 @@ REPORT_COLUMNS = [
     "ticker",
     "date",
     "signal",
+    "report_status",
     "pullback",
     "revenue_yoy",
     "eps_growth_yoy",
@@ -66,6 +67,21 @@ REPORT_COLUMNS = [
 def prepare_report_table(
     strategy_table: pd.DataFrame,
 ) -> pd.DataFrame:
+    """
+    Prepara a tabela de saída sem alterar o sinal operacional.
+
+    report_status é SOMENTE uma classificação visual para o relatório:
+    - ENTRADA_FORTE
+    - ENTRADA_PARCIAL
+    - PROXIMO_DO_GATILHO
+    - AGUARDAR
+
+    PROXIMO_DO_GATILHO:
+    empresa ainda em AGUARDAR, com fundamentos aprovados,
+    Falling Score <= 2 e pullback entre 18% e menos de 20%.
+
+    Isso NÃO cria novo sinal de compra e NÃO altera strategy.py.
+    """
 
     if strategy_table is None or strategy_table.empty:
         return pd.DataFrame()
@@ -77,6 +93,104 @@ def prepare_report_table(
             df["signal"] != "AGUARDAR"
         ]
 
+    def classify_report_status(row):
+        signal = row.get("signal", "AGUARDAR")
+
+        if signal == "ENTRADA_FORTE":
+            return "ENTRADA_FORTE"
+
+        if signal == "ENTRADA_PARCIAL":
+            return "ENTRADA_PARCIAL"
+
+        fundamentals_ok = bool(
+            row.get("fundamentals_ok", False)
+        )
+
+        falling_score = row.get(
+            "falling_score",
+            float("nan"),
+        )
+
+        pullback = row.get(
+            "pullback",
+            float("nan"),
+        )
+
+        if (
+            signal == "AGUARDAR"
+            and fundamentals_ok
+            and pd.notna(falling_score)
+            and falling_score <= 2
+            and pd.notna(pullback)
+            and 0.18 <= pullback < 0.20
+        ):
+            return "PROXIMO_DO_GATILHO"
+
+        return "AGUARDAR"
+
+    df["report_status"] = df.apply(
+        classify_report_status,
+        axis=1,
+    )
+
+    priority = {
+        "ENTRADA_FORTE": 0,
+        "ENTRADA_PARCIAL": 1,
+        "PROXIMO_DO_GATILHO": 2,
+        "AGUARDAR": 3,
+    }
+
+    df["_report_priority"] = (
+        df["report_status"]
+        .map(priority)
+        .fillna(99)
+    )
+
+    # Dentro de PROXIMO_DO_GATILHO, maior pullback vem primeiro,
+    # pois está mais perto do limite mínimo de 20%.
+    # Nos demais grupos, preservamos a ordenação operacional original.
+    df["_original_order"] = range(len(df))
+
+    near_mask = (
+        df["report_status"]
+        == "PROXIMO_DO_GATILHO"
+    )
+
+    near = (
+        df[near_mask]
+        .sort_values(
+            ["pullback", "_original_order"],
+            ascending=[False, True],
+        )
+    )
+
+    others = df[~near_mask].copy()
+
+    ordered_parts = []
+
+    for status in [
+        "ENTRADA_FORTE",
+        "ENTRADA_PARCIAL",
+    ]:
+        ordered_parts.append(
+            others[
+                others["report_status"] == status
+            ].sort_values("_original_order")
+        )
+
+    ordered_parts.append(near)
+
+    ordered_parts.append(
+        others[
+            others["report_status"] == "AGUARDAR"
+        ].sort_values("_original_order")
+    )
+
+    df = pd.concat(
+        ordered_parts,
+        ignore_index=True,
+    )
+
     available = [
         c
         for c in REPORT_COLUMNS
@@ -87,9 +201,7 @@ def prepare_report_table(
         available
     ].copy()
 
-    return df.reset_index(
-        drop=True
-    )
+    return df.reset_index(drop=True)
 
 
 # =============================================================================
@@ -322,8 +434,11 @@ def _build_pdf_rows(
 
                 str(
                     row.get(
-                        "signal",
-                        ""
+                        "report_status",
+                        row.get(
+                            "signal",
+                            ""
+                        )
                     )
                 ),
 
@@ -511,7 +626,11 @@ def generate_pdf_report(
             "60% inicialmente + 40% após crossover SMA50.\n\n"
 
             "AGUARDAR\n"
-            "Falling >= 3 sem confirmações suficientes."
+            "Não há entrada operacional.\n\n"
+
+            "PROXIMO DO GATILHO (apenas monitoramento)\n"
+            "Fundamentos aprovados + Falling <= 2 + queda entre 18% e menos de 20%.\n"
+            "Não é sinal de compra; apenas destaca empresas próximas da zona de 20%-30%."
         )
 
         fig.text(
@@ -565,7 +684,7 @@ def generate_pdf_report(
         )
 
         ax.set_title(
-            "Oportunidades atuais",
+            "Oportunidades e monitoramento",
             fontsize=17,
             pad=20,
             weight="bold",
@@ -575,7 +694,7 @@ def generate_pdf_report(
 
             headers = [
                 "Ticker",
-                "Sinal",
+                "Status",
                 "Queda",
                 "Falling",
                 "Conf.",
@@ -665,6 +784,18 @@ def generate_pdf_report(
             )
 
             details = [
+                (
+                    "Status no relatório",
+                    str(
+                        row.get(
+                            "report_status",
+                            row.get(
+                                "signal",
+                                ""
+                            )
+                        )
+                    ),
+                ),
                 (
                     "Queda",
                     _pct(
