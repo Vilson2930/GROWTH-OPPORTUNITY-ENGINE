@@ -2,25 +2,25 @@
 # GROWTH OPPORTUNITY ENGINE
 # engine/fundamentals.py
 #
-# Motor fundamental.
+# MOTOR FUNDAMENTAL — SEC / EDGAR
 #
-# Fonte principal:
-# SEC / EDGAR Company Facts
-#
-# Responsabilidades:
+# Objetivo:
 # - mapear ticker -> CIK
-# - baixar fundamentos oficiais
-# - calcular crescimento YoY de receita
-# - calcular crescimento YoY de EPS/LPA
-# - classificar crescimento fundamental
+# - baixar Company Facts oficiais da SEC
+# - reconstruir trimestres DISCRETOS
+# - comparar o mesmo trimestre contra o ano anterior
+# - evitar mistura entre trimestre, YTD e exercício anual
+# - priorizar EPS diluído
+# - manter lógica point-in-time
 #
 # NÃO toma decisão final de entrada.
 # =============================================================================
 
 from __future__ import annotations
 
+import os
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -35,7 +35,7 @@ from config import (
 
 
 # =============================================================================
-# 1. SEC
+# 1. CONFIGURAÇÃO SEC
 # =============================================================================
 
 SEC_TICKERS_URL = (
@@ -46,44 +46,43 @@ SEC_COMPANYFACTS_URL = (
     "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 )
 
-# IMPORTANTE:
-# SEC exige identificação do cliente.
-#
-# Pode manter assim inicialmente.
-# Depois podemos colocar email/configuração própria.
-SEC_HEADERS = {
-    "User-Agent": (
-        "GrowthOpportunityEngine/1.0 "
-        "research@example.com"
-    ),
-    "Accept-Encoding": "gzip, deflate",
-    "Host": "data.sec.gov",
-}
-
-SEC_TICKER_HEADERS = {
-    "User-Agent": (
-        "GrowthOpportunityEngine/1.0 "
-        "research@example.com"
-    )
-}
-
 REQUEST_TIMEOUT = 30
 
 SEC_DELAY = 0.12
+
+
+# -----------------------------------------------------------------------------
+# A SEC recomenda User-Agent identificável.
+#
+# No GitHub Actions podemos futuramente definir:
+#
+# SEC_USER_AGENT="GrowthOpportunityEngine/1.0 seu-email@dominio.com"
+#
+# -----------------------------------------------------------------------------
+
+SEC_USER_AGENT = os.getenv(
+    "SEC_USER_AGENT",
+    "GrowthOpportunityEngine/1.0 research@example.com",
+)
+
+SEC_HEADERS = {
+    "User-Agent": SEC_USER_AGENT,
+    "Accept-Encoding": "gzip, deflate",
+}
+
+SESSION = requests.Session()
 
 
 # =============================================================================
 # 2. TAGS XBRL
 # =============================================================================
 
-# Receita pode aparecer com tags diferentes dependendo da empresa.
 REVENUE_TAGS = [
     "RevenueFromContractWithCustomerExcludingAssessedTax",
     "SalesRevenueNet",
     "Revenues",
 ]
 
-# EPS diluído tem prioridade.
 EPS_TAGS = [
     "EarningsPerShareDiluted",
     "EarningsPerShareBasicAndDiluted",
@@ -92,24 +91,17 @@ EPS_TAGS = [
 
 
 # =============================================================================
-# 3. SESSÃO HTTP
-# =============================================================================
-
-SESSION = requests.Session()
-
-
-# =============================================================================
-# 4. MAPA TICKER -> CIK
+# 3. MAPA TICKER -> CIK
 # =============================================================================
 
 def load_sec_ticker_map() -> Dict[str, str]:
     """
-    Baixa mapa oficial ticker -> CIK da SEC.
+    Baixa o mapa oficial ticker -> CIK.
     """
 
     response = SESSION.get(
         SEC_TICKERS_URL,
-        headers=SEC_TICKER_HEADERS,
+        headers=SEC_HEADERS,
         timeout=REQUEST_TIMEOUT,
     )
 
@@ -122,11 +114,17 @@ def load_sec_ticker_map() -> Dict[str, str]:
     for item in raw.values():
 
         ticker = str(
-            item.get("ticker", "")
+            item.get(
+                "ticker",
+                "",
+            )
         ).upper()
 
         cik = str(
-            item.get("cik_str", "")
+            item.get(
+                "cik_str",
+                "",
+            )
         ).zfill(10)
 
         if ticker and cik:
@@ -136,7 +134,7 @@ def load_sec_ticker_map() -> Dict[str, str]:
 
 
 # =============================================================================
-# 5. DOWNLOAD COMPANY FACTS
+# 4. COMPANY FACTS
 # =============================================================================
 
 def download_company_facts(
@@ -145,7 +143,7 @@ def download_company_facts(
     retries: int = 3,
 ) -> Optional[dict]:
     """
-    Baixa Company Facts de uma empresa.
+    Baixa Company Facts da SEC.
     """
 
     url = SEC_COMPANYFACTS_URL.format(
@@ -167,11 +165,13 @@ def download_company_facts(
 
             response.raise_for_status()
 
+            result = response.json()
+
             time.sleep(
                 SEC_DELAY
             )
 
-            return response.json()
+            return result
 
         except Exception as exc:
 
@@ -189,15 +189,15 @@ def download_company_facts(
 
 
 # =============================================================================
-# 6. LOCALIZAR TAG
+# 5. LOCALIZAR TAG XBRL
 # =============================================================================
 
 def _find_fact(
     companyfacts: dict,
-    tags: list,
-) -> Optional[dict]:
+    tags: list[str],
+) -> tuple[Optional[dict], Optional[str]]:
     """
-    Procura a primeira tag válida em us-gaap.
+    Retorna a primeira tag existente.
     """
 
     facts = (
@@ -209,21 +209,25 @@ def _find_fact(
     for tag in tags:
 
         if tag in facts:
-            return facts[tag]
 
-    return None
+            return (
+                facts[tag],
+                tag,
+            )
+
+    return None, None
 
 
 # =============================================================================
-# 7. CONVERTER FACT EM DATAFRAME
+# 6. CONVERTER FACT PARA DATAFRAME
 # =============================================================================
 
 def _fact_to_dataframe(
-    fact: dict,
-    preferred_units: list,
+    fact: Optional[dict],
+    preferred_units: list[str],
 ) -> pd.DataFrame:
     """
-    Converte unidades da SEC em dataframe.
+    Converte uma tag Company Facts para DataFrame.
     """
 
     if fact is None:
@@ -231,38 +235,48 @@ def _fact_to_dataframe(
 
     units = fact.get(
         "units",
-        {}
+        {},
     )
 
-    selected = None
+    values = None
+    selected_unit = None
 
     for unit in preferred_units:
 
         if unit in units:
-            selected = units[unit]
+
+            values = units[unit]
+            selected_unit = unit
+
             break
 
-    if selected is None:
+    if values is None:
         return pd.DataFrame()
 
     df = pd.DataFrame(
-        selected
+        values
     )
 
     if df.empty:
         return df
 
     required = [
+        "start",
         "end",
         "val",
         "filed",
         "form",
     ]
 
-    for col in required:
+    for column in required:
 
-        if col not in df.columns:
+        if column not in df.columns:
             return pd.DataFrame()
+
+    df["start"] = pd.to_datetime(
+        df["start"],
+        errors="coerce",
+    )
 
     df["end"] = pd.to_datetime(
         df["end"],
@@ -281,411 +295,1227 @@ def _fact_to_dataframe(
 
     df = df.dropna(
         subset=[
+            "start",
             "end",
             "filed",
             "val",
         ]
-    )
+    ).copy()
+
+    df["unit"] = selected_unit
+
+    df["duration_days"] = (
+        df["end"]
+        -
+        df["start"]
+    ).dt.days + 1
 
     return df
 
 
 # =============================================================================
-# 8. FILTRAR TRIMESTRES
+# 7. FILTRO POINT-IN-TIME
 # =============================================================================
 
-def _quarterly_values(
+def _point_in_time(
     df: pd.DataFrame,
+    as_of_date=None,
 ) -> pd.DataFrame:
     """
-    Seleciona observações trimestrais utilizáveis.
-
-    Mantém 10-Q e 10-K,
-    reduz duplicidades e prioriza
-    o registro mais recentemente protocolado.
+    Mantém somente informações protocoladas
+    até a data permitida.
     """
 
     if df.empty:
         return df
 
-    temp = df[
+    if as_of_date is None:
+
+        as_of_date = pd.Timestamp.utcnow()
+
+        if as_of_date.tzinfo is not None:
+            as_of_date = as_of_date.tz_localize(None)
+
+        as_of_date = as_of_date.normalize()
+
+    else:
+
+        as_of_date = pd.Timestamp(
+            as_of_date
+        )
+
+        if as_of_date.tzinfo is not None:
+            as_of_date = as_of_date.tz_localize(None)
+
+    return df[
+        df["filed"]
+        <= as_of_date
+    ].copy()
+
+
+# =============================================================================
+# 8. FORMULÁRIOS VÁLIDOS
+# =============================================================================
+
+def _filter_financial_forms(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Mantém filings financeiros úteis.
+    """
+
+    if df.empty:
+        return df
+
+    valid_forms = [
+        "10-Q",
+        "10-Q/A",
+        "10-K",
+        "10-K/A",
+    ]
+
+    return df[
         df["form"].isin(
-            [
-                "10-Q",
-                "10-K",
-                "10-Q/A",
-                "10-K/A",
-            ]
+            valid_forms
+        )
+    ].copy()
+
+
+# =============================================================================
+# 9. TRIMESTRES DISCRETOS DIRETOS
+# =============================================================================
+
+def _direct_discrete_quarters(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Seleciona somente fatos com duração típica
+    de um trimestre.
+
+    Evita misturar:
+    - trimestre
+    - 6 meses acumulados
+    - 9 meses acumulados
+    - ano completo
+    """
+
+    if df.empty:
+        return pd.DataFrame()
+
+    temp = df[
+        df["duration_days"].between(
+            70,
+            110,
         )
     ].copy()
 
     if temp.empty:
         return temp
 
-    # Se existir fp, priorizar Q1/Q2/Q3/FY.
+    # -------------------------------------------------------------------------
+    # Identificar trimestre fiscal.
+    #
+    # 10-Q:
+    # Q1 / Q2 / Q3.
+    #
+    # Um fato trimestral discreto encontrado dentro de 10-K
+    # é tratado como Q4.
+    # -------------------------------------------------------------------------
+
+    temp["quarter"] = None
+
     if "fp" in temp.columns:
 
-        temp = temp[
-            temp["fp"].isin(
-                [
-                    "Q1",
-                    "Q2",
-                    "Q3",
-                    "FY",
-                ]
-            )
-        ]
+        for q in [
+            "Q1",
+            "Q2",
+            "Q3",
+        ]:
 
-    # Elimina observações duplicadas
-    # para o mesmo período.
+            mask = (
+                temp["fp"]
+                ==
+                q
+            )
+
+            temp.loc[
+                mask,
+                "quarter",
+            ] = q
+
+    mask_10k = (
+        temp["form"]
+        .isin(
+            [
+                "10-K",
+                "10-K/A",
+            ]
+        )
+    )
+
+    temp.loc[
+        mask_10k
+        &
+        temp["quarter"].isna(),
+        "quarter",
+    ] = "Q4"
+
+    # -------------------------------------------------------------------------
+    # Se frame SEC explicitamente indicar quarter,
+    # pode ajudar na classificação.
+    # -------------------------------------------------------------------------
+
+    if "frame" in temp.columns:
+
+        frame = (
+            temp["frame"]
+            .astype(str)
+        )
+
+        for q in [
+            "Q1",
+            "Q2",
+            "Q3",
+            "Q4",
+        ]:
+
+            mask = (
+                frame.str.contains(
+                    q,
+                    regex=False,
+                    na=False,
+                )
+            )
+
+            temp.loc[
+                mask
+                &
+                temp["quarter"].isna(),
+                "quarter",
+            ] = q
+
+    temp = temp[
+        temp["quarter"].notna()
+    ].copy()
+
+    # -------------------------------------------------------------------------
+    # Fiscal year
+    # -------------------------------------------------------------------------
+
+    if "fy" in temp.columns:
+
+        temp["fiscal_year"] = pd.to_numeric(
+            temp["fy"],
+            errors="coerce",
+        )
+
+    else:
+
+        temp["fiscal_year"] = np.nan
+
+    # fallback
+    temp["fiscal_year"] = (
+        temp["fiscal_year"]
+        .fillna(
+            temp["end"].dt.year
+        )
+    )
+
+    # -------------------------------------------------------------------------
+    # O mesmo trimestre pode aparecer novamente
+    # em filings posteriores como comparativo.
+    #
+    # Mantemos a observação protocolada mais recentemente.
+    # -------------------------------------------------------------------------
+
     temp = (
         temp
         .sort_values(
             [
-                "end",
+                "fiscal_year",
+                "quarter",
                 "filed",
             ]
         )
         .drop_duplicates(
             subset=[
-                "end",
+                "fiscal_year",
+                "quarter",
             ],
             keep="last",
         )
     )
 
-    return temp.sort_values(
-        "end"
-    ).reset_index(
-        drop=True
+    temp["derived"] = False
+
+    return temp
+
+
+# =============================================================================
+# 10. RECONSTRUIR Q4 DE RECEITA
+# =============================================================================
+
+def _derive_q4_revenue(
+    full_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Para RECEITA somente:
+
+    Q4 = Receita anual - Receita acumulada 9M.
+
+    Receita é aditiva, portanto essa reconstrução
+    é aceitável quando annual e 9M pertencem
+    ao mesmo exercício fiscal.
+
+    NÃO usamos esta técnica para EPS.
+    """
+
+    if full_df.empty:
+        return pd.DataFrame()
+
+    df = full_df.copy()
+
+    if "fy" not in df.columns:
+        return pd.DataFrame()
+
+    df["fiscal_year"] = pd.to_numeric(
+        df["fy"],
+        errors="coerce",
     )
 
+    rows = []
 
-# =============================================================================
-# 9. CRESCIMENTO YOY
-# =============================================================================
+    fiscal_years = (
+        df["fiscal_year"]
+        .dropna()
+        .unique()
+    )
 
-def _calculate_yoy(
-    df: pd.DataFrame,
-) -> Tuple[
-    float,
-    Optional[pd.Timestamp],
-]:
-    """
-    Calcula crescimento YoY usando último período
-    e período aproximadamente equivalente 1 ano antes.
+    for fiscal_year in fiscal_years:
 
-    Procura período com diferença entre
-    330 e 400 dias.
-    """
+        subset = df[
+            df["fiscal_year"]
+            ==
+            fiscal_year
+        ].copy()
 
-    if df is None or len(df) < 2:
-        return np.nan, None
+        # ---------------------------------------------------------------------
+        # ANUAL
+        # ---------------------------------------------------------------------
 
-    df = df.sort_values(
-        "end"
-    ).copy()
-
-    latest = df.iloc[-1]
-
-    latest_date = latest["end"]
-    latest_value = latest["val"]
-
-    previous_candidates = df[
-        df["end"] < latest_date
-    ].copy()
-
-    previous_candidates[
-        "days_difference"
-    ] = (
-        latest_date
-        -
-        previous_candidates["end"]
-    ).dt.days
-
-    previous_candidates = (
-        previous_candidates[
-            previous_candidates[
-                "days_difference"
+        annual = subset[
+            subset[
+                "duration_days"
             ].between(
-                330,
+                300,
                 400,
             )
-        ]
-    )
+            &
+            subset[
+                "form"
+            ].isin(
+                [
+                    "10-K",
+                    "10-K/A",
+                ]
+            )
+        ].copy()
 
-    if previous_candidates.empty:
-        return np.nan, latest_date
+        if annual.empty:
+            continue
 
-    previous_candidates[
-        "distance_365"
-    ] = (
-        previous_candidates[
-            "days_difference"
-        ]
-        -
-        365
-    ).abs()
-
-    previous = (
-        previous_candidates
-        .sort_values(
-            "distance_365"
+        annual = (
+            annual
+            .sort_values(
+                "filed"
+            )
+            .iloc[-1]
         )
-        .iloc[0]
+
+        # ---------------------------------------------------------------------
+        # 9 MESES / Q3 YTD
+        # ---------------------------------------------------------------------
+
+        ytd9 = subset[
+            subset[
+                "duration_days"
+            ].between(
+                240,
+                300,
+            )
+            &
+            subset[
+                "form"
+            ].isin(
+                [
+                    "10-Q",
+                    "10-Q/A",
+                ]
+            )
+        ].copy()
+
+        if "fp" in ytd9.columns:
+
+            preferred = ytd9[
+                ytd9["fp"] == "Q3"
+            ]
+
+            if not preferred.empty:
+                ytd9 = preferred
+
+        if ytd9.empty:
+            continue
+
+        # somente 9M que termina antes do anual
+        ytd9 = ytd9[
+            ytd9["end"]
+            <
+            annual["end"]
+        ]
+
+        if ytd9.empty:
+            continue
+
+        ytd9 = (
+            ytd9
+            .sort_values(
+                [
+                    "end",
+                    "filed",
+                ]
+            )
+            .iloc[-1]
+        )
+
+        q4_value = (
+            annual["val"]
+            -
+            ytd9["val"]
+        )
+
+        if not np.isfinite(
+            q4_value
+        ):
+            continue
+
+        q4_start = (
+            ytd9["end"]
+            +
+            pd.Timedelta(
+                days=1
+            )
+        )
+
+        q4_duration = (
+            annual["end"]
+            -
+            q4_start
+        ).days + 1
+
+        if not (
+            60
+            <= q4_duration
+            <= 120
+        ):
+            continue
+
+        rows.append(
+            {
+                "start":
+                    q4_start,
+
+                "end":
+                    annual["end"],
+
+                "val":
+                    float(
+                        q4_value
+                    ),
+
+                "filed":
+                    annual["filed"],
+
+                "form":
+                    annual["form"],
+
+                "fy":
+                    fiscal_year,
+
+                "fp":
+                    "Q4",
+
+                "quarter":
+                    "Q4",
+
+                "fiscal_year":
+                    fiscal_year,
+
+                "duration_days":
+                    q4_duration,
+
+                "unit":
+                    annual.get(
+                        "unit",
+                        "USD",
+                    ),
+
+                "derived":
+                    True,
+            }
+        )
+
+    return pd.DataFrame(
+        rows
     )
-
-    old_value = previous["val"]
-
-    if (
-        pd.isna(old_value)
-        or old_value == 0
-    ):
-        return np.nan, latest_date
-
-    # Receita: interpretação normal.
-    #
-    # EPS negativo pode gerar crescimento
-    # matematicamente estranho.
-    # O tratamento específico será feito depois.
-    growth = (
-        latest_value
-        /
-        abs(old_value)
-        - 1
-    )
-
-    return float(growth), latest_date
 
 
 # =============================================================================
-# 10. RECEITA
+# 11. CONSTRUIR SÉRIE TRIMESTRAL
 # =============================================================================
 
-def extract_revenue_growth(
-    companyfacts: dict,
-) -> Tuple[
-    float,
-    Optional[pd.Timestamp],
-]:
+def _build_quarterly_series(
+    fact: Optional[dict],
+    preferred_units: list[str],
+    as_of_date=None,
+    allow_q4_derivation: bool = False,
+) -> pd.DataFrame:
     """
-    Extrai crescimento YoY de receita.
+    Constrói série de trimestres comparáveis.
     """
-
-    fact = _find_fact(
-        companyfacts,
-        REVENUE_TAGS,
-    )
 
     df = _fact_to_dataframe(
         fact,
-        preferred_units=[
-            "USD",
-        ],
+        preferred_units,
     )
 
-    df = _quarterly_values(
+    df = _filter_financial_forms(
         df
     )
 
-    return _calculate_yoy(
-        df
+    df = _point_in_time(
+        df,
+        as_of_date,
+    )
+
+    if df.empty:
+        return pd.DataFrame()
+
+    direct = (
+        _direct_discrete_quarters(
+            df
+        )
+    )
+
+    pieces = []
+
+    if not direct.empty:
+        pieces.append(
+            direct
+        )
+
+    if allow_q4_derivation:
+
+        derived_q4 = (
+            _derive_q4_revenue(
+                df
+            )
+        )
+
+        if not derived_q4.empty:
+            pieces.append(
+                derived_q4
+            )
+
+    if not pieces:
+        return pd.DataFrame()
+
+    result = pd.concat(
+        pieces,
+        ignore_index=True,
+        sort=False,
+    )
+
+    # -------------------------------------------------------------------------
+    # Se existe observação direta e reconstruída do mesmo trimestre,
+    # preferimos DIRETA.
+    # -------------------------------------------------------------------------
+
+    result[
+        "_derived_sort"
+    ] = result[
+        "derived"
+    ].astype(int)
+
+    result = (
+        result
+        .sort_values(
+            [
+                "fiscal_year",
+                "quarter",
+                "_derived_sort",
+                "filed",
+            ],
+            ascending=[
+                True,
+                True,
+                True,
+                True,
+            ],
+        )
+        .drop_duplicates(
+            subset=[
+                "fiscal_year",
+                "quarter",
+            ],
+            keep="first",
+        )
+        .drop(
+            columns=[
+                "_derived_sort"
+            ]
+        )
+    )
+
+    return (
+        result
+        .sort_values(
+            [
+                "end",
+                "fiscal_year",
+                "quarter",
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
 
 # =============================================================================
-# 11. EPS
+# 12. CRESCIMENTO DO MESMO TRIMESTRE
 # =============================================================================
 
-def extract_eps_growth(
-    companyfacts: dict,
-) -> Tuple[
+def _quarter_yoy(
+    quarters: pd.DataFrame,
+    fiscal_year: int,
+    quarter: str,
+) -> tuple[
     float,
+    Optional[pd.Timestamp],
     Optional[pd.Timestamp],
 ]:
     """
-    Extrai crescimento YoY de EPS/LPA.
+    Compara:
 
-    Prioridade:
-    EPS diluído.
+    Qx do ano fiscal atual
+    contra
+    Qx do ano fiscal anterior.
     """
 
-    fact = _find_fact(
-        companyfacts,
-        EPS_TAGS,
-    )
+    if quarters.empty:
+        return np.nan, None, None
 
-    df = _fact_to_dataframe(
-        fact,
-        preferred_units=[
-            "USD/shares",
-            "USD / shares",
-        ],
-    )
-
-    df = _quarterly_values(
-        df
-    )
-
-    if len(df) < 2:
-        return np.nan, None
-
-    latest = df.iloc[-1]
-
-    latest_date = latest["end"]
-    latest_eps = latest["val"]
-
-    candidates = df[
-        df["end"] < latest_date
-    ].copy()
-
-    candidates[
-        "days_difference"
-    ] = (
-        latest_date
-        -
-        candidates["end"]
-    ).dt.days
-
-    candidates = candidates[
-        candidates[
-            "days_difference"
-        ].between(
-            330,
-            400,
+    current = quarters[
+        (
+            quarters["fiscal_year"]
+            ==
+            fiscal_year
+        )
+        &
+        (
+            quarters["quarter"]
+            ==
+            quarter
         )
     ]
 
-    if candidates.empty:
-        return np.nan, latest_date
-
-    candidates[
-        "distance_365"
-    ] = (
-        candidates[
-            "days_difference"
-        ]
-        -
-        365
-    ).abs()
-
-    old = (
-        candidates
-        .sort_values(
-            "distance_365"
+    previous = quarters[
+        (
+            quarters["fiscal_year"]
+            ==
+            fiscal_year - 1
         )
-        .iloc[0]
+        &
+        (
+            quarters["quarter"]
+            ==
+            quarter
+        )
+    ]
+
+    if (
+        current.empty
+        or previous.empty
+    ):
+
+        return np.nan, None, None
+
+    current = current.iloc[-1]
+    previous = previous.iloc[-1]
+
+    current_value = float(
+        current["val"]
     )
 
-    previous_eps = old["val"]
+    previous_value = float(
+        previous["val"]
+    )
+
+    if (
+        not np.isfinite(current_value)
+        or
+        not np.isfinite(previous_value)
+        or
+        previous_value == 0
+    ):
+
+        return (
+            np.nan,
+            current["end"],
+            current["filed"],
+        )
+
+    growth = (
+        current_value
+        /
+        previous_value
+        - 1
+    )
+
+    return (
+        float(growth),
+        current["end"],
+        current["filed"],
+    )
+
+
+# =============================================================================
+# 13. EPS YOY
+# =============================================================================
+
+def _eps_quarter_yoy(
+    quarters: pd.DataFrame,
+    fiscal_year: int,
+    quarter: str,
+) -> tuple[
+    float,
+    str,
+    Optional[pd.Timestamp],
+    Optional[pd.Timestamp],
+]:
+    """
+    Crescimento de EPS apenas quando percentual
+    é economicamente interpretável.
+
+    Não converte prejuízo -> lucro artificialmente
+    em +100%.
+    """
+
+    if quarters.empty:
+
+        return (
+            np.nan,
+            "SEM_DADOS",
+            None,
+            None,
+        )
+
+    current = quarters[
+        (
+            quarters["fiscal_year"]
+            ==
+            fiscal_year
+        )
+        &
+        (
+            quarters["quarter"]
+            ==
+            quarter
+        )
+    ]
+
+    previous = quarters[
+        (
+            quarters["fiscal_year"]
+            ==
+            fiscal_year - 1
+        )
+        &
+        (
+            quarters["quarter"]
+            ==
+            quarter
+        )
+    ]
+
+    if (
+        current.empty
+        or previous.empty
+    ):
+
+        return (
+            np.nan,
+            "SEM_COMPARATIVO",
+            None,
+            None,
+        )
+
+    current = current.iloc[-1]
+    previous = previous.iloc[-1]
+
+    current_eps = float(
+        current["val"]
+    )
+
+    previous_eps = float(
+        previous["val"]
+    )
 
     # -------------------------------------------------------------------------
-    # Casos
+    # ambos positivos
     # -------------------------------------------------------------------------
 
-    # lucro positivo nos dois períodos
     if (
         previous_eps > 0
-        and latest_eps > 0
+        and
+        current_eps > 0
     ):
 
         growth = (
-            latest_eps
+            current_eps
             /
             previous_eps
             - 1
         )
 
-        return float(growth), latest_date
+        return (
+            float(growth),
+            "POSITIVO_CRESCIMENTO",
+            current["end"],
+            current["filed"],
+        )
 
-    # saiu de prejuízo para lucro:
-    # recuperação fundamental forte.
+    # -------------------------------------------------------------------------
+    # prejuízo -> lucro
+    #
+    # É recuperação, mas crescimento percentual
+    # não é matematicamente comparável.
+    # -------------------------------------------------------------------------
+
     if (
         previous_eps <= 0
-        and latest_eps > 0
+        and
+        current_eps > 0
     ):
 
-        return 1.0, latest_date
+        return (
+            np.nan,
+            "RECUPERANDO",
+            current["end"],
+            current["filed"],
+        )
 
-    # continua negativo
-    if latest_eps <= 0:
+    # -------------------------------------------------------------------------
+    # lucro -> prejuízo
+    # -------------------------------------------------------------------------
 
-        return np.nan, latest_date
+    if (
+        previous_eps > 0
+        and
+        current_eps <= 0
+    ):
 
-    return np.nan, latest_date
+        return (
+            np.nan,
+            "DETERIORANDO",
+            current["end"],
+            current["filed"],
+        )
+
+    # -------------------------------------------------------------------------
+    # ambos negativos
+    # -------------------------------------------------------------------------
+
+    return (
+        np.nan,
+        "EPS_NEGATIVO",
+        current["end"],
+        current["filed"],
+    )
 
 
 # =============================================================================
-# 12. CLASSIFICAÇÃO FUNDAMENTAL
+# 14. LOCALIZAR ÚLTIMO TRIMESTRE COMUM
+# =============================================================================
+
+def _latest_common_quarter(
+    revenue_q: pd.DataFrame,
+    eps_q: pd.DataFrame,
+) -> Optional[tuple[int, str]]:
+    """
+    Receita e EPS precisam referir-se
+    ao MESMO trimestre fiscal.
+    """
+
+    if (
+        revenue_q.empty
+        or
+        eps_q.empty
+    ):
+
+        return None
+
+    rev_keys = set(
+        zip(
+            revenue_q[
+                "fiscal_year"
+            ].astype(int),
+
+            revenue_q[
+                "quarter"
+            ],
+        )
+    )
+
+    eps_keys = set(
+        zip(
+            eps_q[
+                "fiscal_year"
+            ].astype(int),
+
+            eps_q[
+                "quarter"
+            ],
+        )
+    )
+
+    common = (
+        rev_keys
+        &
+        eps_keys
+    )
+
+    if not common:
+        return None
+
+    candidates = []
+
+    for fiscal_year, quarter in common:
+
+        rev = revenue_q[
+            (
+                revenue_q[
+                    "fiscal_year"
+                ]
+                ==
+                fiscal_year
+            )
+            &
+            (
+                revenue_q[
+                    "quarter"
+                ]
+                ==
+                quarter
+            )
+        ]
+
+        eps = eps_q[
+            (
+                eps_q[
+                    "fiscal_year"
+                ]
+                ==
+                fiscal_year
+            )
+            &
+            (
+                eps_q[
+                    "quarter"
+                ]
+                ==
+                quarter
+            )
+        ]
+
+        if (
+            rev.empty
+            or
+            eps.empty
+        ):
+            continue
+
+        period_end = min(
+            rev.iloc[-1]["end"],
+            eps.iloc[-1]["end"],
+        )
+
+        candidates.append(
+            (
+                period_end,
+                int(fiscal_year),
+                str(quarter),
+            )
+        )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda x: x[0]
+    )
+
+    _, fiscal_year, quarter = (
+        candidates[-1]
+    )
+
+    return (
+        fiscal_year,
+        quarter,
+    )
+
+
+# =============================================================================
+# 15. CLASSIFICAÇÃO FUNDAMENTAL
 # =============================================================================
 
 def classify_growth(
     revenue_growth: float,
     eps_growth: float,
+    eps_state: str,
 ) -> str:
     """
-    Classificação simples e interpretável.
+    CRESCIMENTO_FORTE exige:
 
-    CRESCIMENTO_FORTE:
-    receita >= mínimo
-    E
-    EPS >= mínimo.
+    Receita YoY >= mínimo
+    +
+    EPS YoY positivo e >= mínimo.
+
+    Recuperação de prejuízo para lucro
+    NÃO é automaticamente transformada
+    em crescimento percentual.
     """
 
-    if (
-        pd.isna(revenue_growth)
-        or pd.isna(eps_growth)
+    if pd.isna(
+        revenue_growth
     ):
+
+        return "SEM_DADOS"
+
+    if eps_state in {
+        "RECUPERANDO",
+        "DETERIORANDO",
+        "EPS_NEGATIVO",
+    }:
+
+        return "NAO_APROVADO"
+
+    if pd.isna(
+        eps_growth
+    ):
+
         return "SEM_DADOS"
 
     if (
         revenue_growth
-        >= MIN_REVENUE_GROWTH
+        >=
+        MIN_REVENUE_GROWTH
         and
         eps_growth
-        >= MIN_EPS_GROWTH
+        >=
+        MIN_EPS_GROWTH
     ):
+
         return "CRESCIMENTO_FORTE"
 
     return "NAO_APROVADO"
 
 
 # =============================================================================
-# 13. ANALISAR EMPRESA
+# 16. ANALISAR EMPRESA
 # =============================================================================
 
 def analyze_company_fundamentals(
     ticker: str,
     cik: str,
+    as_of_date=None,
 ) -> Optional[dict]:
     """
-    Analisa uma empresa.
+    Analisa uma empresa usando trimestres
+    fiscalmente comparáveis.
     """
 
-    companyfacts = download_company_facts(
-        cik=cik,
-        ticker=ticker,
+    companyfacts = (
+        download_company_facts(
+            cik=cik,
+            ticker=ticker,
+        )
     )
 
     if companyfacts is None:
         return None
 
-    revenue_growth, revenue_period = (
-        extract_revenue_growth(
-            companyfacts
+    # -------------------------------------------------------------------------
+    # RECEITA
+    # -------------------------------------------------------------------------
+
+    revenue_fact, revenue_tag = (
+        _find_fact(
+            companyfacts,
+            REVENUE_TAGS,
         )
     )
 
-    eps_growth, eps_period = (
-        extract_eps_growth(
-            companyfacts
+    revenue_q = (
+        _build_quarterly_series(
+            revenue_fact,
+            preferred_units=[
+                "USD",
+            ],
+            as_of_date=as_of_date,
+            allow_q4_derivation=True,
         )
     )
 
-    classification = classify_growth(
+    # -------------------------------------------------------------------------
+    # EPS
+    # -------------------------------------------------------------------------
+
+    eps_fact, eps_tag = (
+        _find_fact(
+            companyfacts,
+            EPS_TAGS,
+        )
+    )
+
+    eps_q = (
+        _build_quarterly_series(
+            eps_fact,
+            preferred_units=[
+                "USD/shares",
+                "USD / shares",
+            ],
+            as_of_date=as_of_date,
+            allow_q4_derivation=False,
+        )
+    )
+
+    # -------------------------------------------------------------------------
+    # MESMO TRIMESTRE PARA RECEITA + EPS
+    # -------------------------------------------------------------------------
+
+    common = (
+        _latest_common_quarter(
+            revenue_q,
+            eps_q,
+        )
+    )
+
+    if common is None:
+
+        return {
+            "ticker":
+                ticker,
+
+            "cik":
+                cik,
+
+            "revenue_yoy":
+                np.nan,
+
+            "eps_growth_yoy":
+                np.nan,
+
+            "eps_state":
+                "SEM_DADOS",
+
+            "fiscal_year":
+                np.nan,
+
+            "fiscal_quarter":
+                None,
+
+            "period_end":
+                None,
+
+            "revenue_filed":
+                None,
+
+            "eps_filed":
+                None,
+
+            "revenue_tag":
+                revenue_tag,
+
+            "eps_tag":
+                eps_tag,
+
+            "growth_class":
+                "SEM_DADOS",
+
+            "fundamentals_ok":
+                False,
+        }
+
+    fiscal_year, quarter = common
+
+    # -------------------------------------------------------------------------
+    # RECEITA YOY
+    # -------------------------------------------------------------------------
+
+    (
         revenue_growth,
-        eps_growth,
+        revenue_period,
+        revenue_filed,
+    ) = _quarter_yoy(
+        revenue_q,
+        fiscal_year,
+        quarter,
     )
+
+    # -------------------------------------------------------------------------
+    # EPS YOY
+    # -------------------------------------------------------------------------
+
+    (
+        eps_growth,
+        eps_state,
+        eps_period,
+        eps_filed,
+    ) = _eps_quarter_yoy(
+        eps_q,
+        fiscal_year,
+        quarter,
+    )
+
+    # -------------------------------------------------------------------------
+    # CLASSIFICAÇÃO
+    # -------------------------------------------------------------------------
+
+    classification = (
+        classify_growth(
+            revenue_growth,
+            eps_growth,
+            eps_state,
+        )
+    )
+
+    period_end = None
+
+    periods = [
+        x
+        for x in [
+            revenue_period,
+            eps_period,
+        ]
+        if x is not None
+    ]
+
+    if periods:
+
+        period_end = min(
+            periods
+        )
 
     return {
         "ticker":
@@ -700,11 +1530,29 @@ def analyze_company_fundamentals(
         "eps_growth_yoy":
             eps_growth,
 
-        "revenue_period":
-            revenue_period,
+        "eps_state":
+            eps_state,
 
-        "eps_period":
-            eps_period,
+        "fiscal_year":
+            fiscal_year,
+
+        "fiscal_quarter":
+            quarter,
+
+        "period_end":
+            period_end,
+
+        "revenue_filed":
+            revenue_filed,
+
+        "eps_filed":
+            eps_filed,
+
+        "revenue_tag":
+            revenue_tag,
+
+        "eps_tag":
+            eps_tag,
 
         "growth_class":
             classification,
@@ -719,40 +1567,49 @@ def analyze_company_fundamentals(
 
 
 # =============================================================================
-# 14. ANALISAR UNIVERSO
+# 17. ANALISAR UNIVERSO
 # =============================================================================
 
 def analyze_fundamentals(
     tickers=None,
+    as_of_date=None,
 ) -> pd.DataFrame:
     """
-    Analisa o universo completo.
+    Analisa todo o universo.
     """
 
     if tickers is None:
         tickers = UNIVERSE
 
-    ticker_map = load_sec_ticker_map()
+    ticker_map = (
+        load_sec_ticker_map()
+    )
 
     rows = []
 
-    total = len(tickers)
+    total = len(
+        tickers
+    )
 
-    print("=" * 80)
+    print("=" * 90)
     print(
         "GROWTH OPPORTUNITY ENGINE"
     )
     print(
-        "ANÁLISE FUNDAMENTAL — SEC"
+        "ANÁLISE FUNDAMENTAL — SEC | TRIMESTRES DISCRETOS"
     )
-    print("=" * 80)
+    print("=" * 90)
 
     for i, ticker in enumerate(
         tickers,
         start=1,
     ):
 
-        ticker = ticker.upper()
+        ticker = (
+            str(ticker)
+            .upper()
+            .strip()
+        )
 
         cik = ticker_map.get(
             ticker
@@ -769,6 +1626,7 @@ def analyze_fundamentals(
         if cik is None:
 
             if VERBOSE:
+
                 print(
                     "❌ CIK não encontrado"
                 )
@@ -777,14 +1635,16 @@ def analyze_fundamentals(
 
         result = (
             analyze_company_fundamentals(
-                ticker,
-                cik,
+                ticker=ticker,
+                cik=cik,
+                as_of_date=as_of_date,
             )
         )
 
         if result is None:
 
             if VERBOSE:
+
                 print(
                     "❌ falha SEC"
                 )
@@ -817,9 +1677,22 @@ def analyze_fundamentals(
                 else "N/A"
             )
 
+            period_text = (
+                f"{result['fiscal_year']}"
+                f"-{result['fiscal_quarter']}"
+                if pd.notna(
+                    result[
+                        "fiscal_year"
+                    ]
+                )
+                else "N/A"
+            )
+
             print(
-                f"✅ Receita {rev_text} | "
+                f"✅ {period_text} | "
+                f"Receita {rev_text} | "
                 f"EPS {eps_text} | "
+                f"{result['eps_state']} | "
                 f"{result['growth_class']}"
             )
 
@@ -827,7 +1700,7 @@ def analyze_fundamentals(
         rows
     )
 
-    print("-" * 80)
+    print("-" * 90)
 
     print(
         f"Empresas solicitadas: "
@@ -844,21 +1717,36 @@ def analyze_fundamentals(
         approved = (
             result_df[
                 "fundamentals_ok"
-            ].sum()
+            ]
+            .fillna(False)
+            .sum()
         )
+
+        no_data = (
+            result_df[
+                "growth_class"
+            ]
+            ==
+            "SEM_DADOS"
+        ).sum()
 
         print(
             f"Crescimento forte: "
             f"{approved}"
         )
 
-    print("=" * 80)
+        print(
+            f"Sem dados comparáveis: "
+            f"{no_data}"
+        )
+
+    print("=" * 90)
 
     return result_df
 
 
 # =============================================================================
-# 15. TESTE LOCAL
+# 18. TESTE LOCAL
 # =============================================================================
 
 if __name__ == "__main__":
@@ -868,6 +1756,7 @@ if __name__ == "__main__":
         "MSFT",
         "NVDA",
         "AMZN",
+        "MU",
     ]
 
     fundamentals = (
@@ -884,25 +1773,43 @@ if __name__ == "__main__":
 
     else:
 
-        print("\nRESULTADO:")
+        print(
+            "\nRESULTADO FUNDAMENTAL:"
+        )
+
+        columns = [
+            "ticker",
+            "fiscal_year",
+            "fiscal_quarter",
+            "period_end",
+            "revenue_yoy",
+            "eps_growth_yoy",
+            "eps_state",
+            "growth_class",
+            "fundamentals_ok",
+        ]
+
+        columns = [
+            c
+            for c in columns
+            if c in fundamentals.columns
+        ]
 
         show = fundamentals[
-            [
-                "ticker",
-                "revenue_yoy",
-                "eps_growth_yoy",
-                "growth_class",
-                "fundamentals_ok",
-            ]
+            columns
         ].copy()
 
-        show[
-            "revenue_yoy"
-        ] *= 100
+        for col in [
+            "revenue_yoy",
+            "eps_growth_yoy",
+        ]:
 
-        show[
-            "eps_growth_yoy"
-        ] *= 100
+            if col in show.columns:
+
+                show[col] = (
+                    show[col]
+                    * 100
+                )
 
         print(
             show.to_string(
