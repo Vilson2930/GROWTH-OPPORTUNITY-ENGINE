@@ -1379,56 +1379,72 @@ def analyze_company_fundamentals(
     as_of_date=None,
 ) -> Optional[dict]:
     """
-    Analisa uma empresa usando trimestres
-    fiscalmente comparáveis.
+    Analisa uma empresa usando trimestres fiscalmente comparáveis.
+
+    Correção v1.0:
+    - não depende mais de uma única tag XBRL escolhida previamente;
+    - testa combinações válidas de tags de Receita e EPS;
+    - exige que o YoY de cada métrica seja calculado dentro da MESMA tag;
+    - escolhe a combinação que produz o trimestre comparável mais recente;
+    - mantém point-in-time, recência máxima e fail-safe SEM_DADOS.
     """
 
-    companyfacts = (
-        download_company_facts(
-            cik=cik,
-            ticker=ticker,
-        )
+    companyfacts = download_company_facts(
+        cik=cik,
+        ticker=ticker,
     )
 
     if companyfacts is None:
         return None
 
-    # -------------------------------------------------------------------------
-    # RECEITA
-    # -------------------------------------------------------------------------
-
-    revenue_fact, revenue_tag = (
-        _find_fact(
-            companyfacts,
-            REVENUE_TAGS,
-        )
+    us_gaap = (
+        companyfacts
+        .get("facts", {})
+        .get("us-gaap", {})
     )
 
-    revenue_q = (
-        _build_quarterly_series(
-            revenue_fact,
-            preferred_units=[
-                "USD",
-            ],
+    # -------------------------------------------------------------------------
+    # CONSTRUIR TODAS AS SÉRIES DE RECEITA DISPONÍVEIS
+    # -------------------------------------------------------------------------
+    revenue_series = []
+
+    for priority, tag in enumerate(REVENUE_TAGS):
+        fact = us_gaap.get(tag)
+
+        if not fact:
+            continue
+
+        q = _build_quarterly_series(
+            fact,
+            preferred_units=["USD"],
             as_of_date=as_of_date,
             allow_q4_derivation=True,
         )
-    )
 
-    # -------------------------------------------------------------------------
-    # EPS
-    # -------------------------------------------------------------------------
+        if q.empty:
+            continue
 
-    eps_fact, eps_tag = (
-        _find_fact(
-            companyfacts,
-            EPS_TAGS,
+        revenue_series.append(
+            {
+                "tag": tag,
+                "priority": priority,
+                "quarters": q,
+            }
         )
-    )
 
-    eps_q = (
-        _build_quarterly_series(
-            eps_fact,
+    # -------------------------------------------------------------------------
+    # CONSTRUIR TODAS AS SÉRIES DE EPS DISPONÍVEIS
+    # -------------------------------------------------------------------------
+    eps_series = []
+
+    for priority, tag in enumerate(EPS_TAGS):
+        fact = us_gaap.get(tag)
+
+        if not fact:
+            continue
+
+        q = _build_quarterly_series(
+            fact,
             preferred_units=[
                 "USD/shares",
                 "USD / shares",
@@ -1436,213 +1452,224 @@ def analyze_company_fundamentals(
             as_of_date=as_of_date,
             allow_q4_derivation=False,
         )
-    )
 
-    # -------------------------------------------------------------------------
-    # MESMO TRIMESTRE PARA RECEITA + EPS
-    # -------------------------------------------------------------------------
+        if q.empty:
+            continue
 
-    common = (
-        _latest_common_quarter(
-            revenue_q,
-            eps_q,
-            as_of_date=as_of_date,
+        eps_series.append(
+            {
+                "tag": tag,
+                "priority": priority,
+                "quarters": q,
+            }
         )
+
+    # Tags apenas para diagnóstico quando não houver combinação válida.
+    best_revenue_tag = (
+        revenue_series[0]["tag"]
+        if revenue_series
+        else None
     )
 
-    if common is None:
+    best_eps_tag = (
+        eps_series[0]["tag"]
+        if eps_series
+        else None
+    )
 
+    # -------------------------------------------------------------------------
+    # TESTAR COMBINAÇÕES
+    #
+    # Importante:
+    # receita atual e receita do ano anterior permanecem na MESMA tag;
+    # EPS atual e EPS do ano anterior permanecem na MESMA tag.
+    #
+    # Assim aumentamos cobertura sem misturar conceitos XBRL no cálculo YoY.
+    # -------------------------------------------------------------------------
+    candidates = []
+
+    for rev_item in revenue_series:
+        revenue_q = rev_item["quarters"]
+
+        for eps_item in eps_series:
+            eps_q = eps_item["quarters"]
+
+            common = _latest_common_quarter(
+                revenue_q,
+                eps_q,
+                as_of_date=as_of_date,
+            )
+
+            if common is None:
+                continue
+
+            fiscal_year, quarter = common
+
+            (
+                revenue_growth,
+                revenue_period,
+                revenue_filed,
+            ) = _quarter_yoy(
+                revenue_q,
+                fiscal_year,
+                quarter,
+            )
+
+            (
+                eps_growth,
+                eps_state,
+                eps_period,
+                eps_filed,
+            ) = _eps_quarter_yoy(
+                eps_q,
+                fiscal_year,
+                quarter,
+            )
+
+            periods = [
+                x
+                for x in [
+                    revenue_period,
+                    eps_period,
+                ]
+                if x is not None
+            ]
+
+            if not periods:
+                continue
+
+            period_end = min(periods)
+
+            filed_dates = [
+                x
+                for x in [
+                    revenue_filed,
+                    eps_filed,
+                ]
+                if x is not None
+            ]
+
+            latest_filed = (
+                max(filed_dates)
+                if filed_dates
+                else pd.Timestamp.min
+            )
+
+            # Período econômico mais recente domina.
+            # Em empate, priorizamos tags listadas primeiro.
+            candidates.append(
+                {
+                    "period_end": pd.Timestamp(period_end),
+                    "latest_filed": pd.Timestamp(latest_filed),
+                    "fiscal_year": int(fiscal_year),
+                    "quarter": str(quarter),
+                    "revenue_growth": revenue_growth,
+                    "revenue_filed": revenue_filed,
+                    "eps_growth": eps_growth,
+                    "eps_state": eps_state,
+                    "eps_filed": eps_filed,
+                    "revenue_tag": rev_item["tag"],
+                    "eps_tag": eps_item["tag"],
+                    "rev_priority": rev_item["priority"],
+                    "eps_priority": eps_item["priority"],
+                }
+            )
+
+    if not candidates:
         return {
-            "ticker":
-                ticker,
-
-            "cik":
-                cik,
-
-            "revenue_yoy":
-                np.nan,
-
-            "eps_growth_yoy":
-                np.nan,
-
-            "eps_state":
-                "SEM_DADOS",
-
-            "fiscal_year":
-                np.nan,
-
-            "fiscal_quarter":
-                None,
-
-            "period_end":
-                None,
-
-            "revenue_filed":
-                None,
-
-            "eps_filed":
-                None,
-
-            "revenue_tag":
-                revenue_tag,
-
-            "eps_tag":
-                eps_tag,
-
-            "fundamental_age_days":
-                np.nan,
-
-            "fundamental_recent":
-                False,
-
-            "growth_class":
-                "SEM_DADOS",
-
-            "fundamentals_ok":
-                False,
+            "ticker": ticker,
+            "cik": cik,
+            "revenue_yoy": np.nan,
+            "eps_growth_yoy": np.nan,
+            "eps_state": "SEM_DADOS",
+            "fiscal_year": np.nan,
+            "fiscal_quarter": None,
+            "period_end": None,
+            "revenue_filed": None,
+            "eps_filed": None,
+            "revenue_tag": best_revenue_tag,
+            "eps_tag": best_eps_tag,
+            "fundamental_age_days": np.nan,
+            "fundamental_recent": False,
+            "growth_class": "SEM_DADOS",
+            "fundamentals_ok": False,
         }
 
-    fiscal_year, quarter = common
-
-    # -------------------------------------------------------------------------
-    # RECEITA YOY
-    # -------------------------------------------------------------------------
-
-    (
-        revenue_growth,
-        revenue_period,
-        revenue_filed,
-    ) = _quarter_yoy(
-        revenue_q,
-        fiscal_year,
-        quarter,
+    candidates.sort(
+        key=lambda x: (
+            x["period_end"],
+            x["latest_filed"],
+            -x["rev_priority"],
+            -x["eps_priority"],
+        )
     )
 
-    # -------------------------------------------------------------------------
-    # EPS YOY
-    # -------------------------------------------------------------------------
+    chosen = candidates[-1]
 
-    (
+    fiscal_year = chosen["fiscal_year"]
+    quarter = chosen["quarter"]
+    revenue_growth = chosen["revenue_growth"]
+    revenue_filed = chosen["revenue_filed"]
+    eps_growth = chosen["eps_growth"]
+    eps_state = chosen["eps_state"]
+    eps_filed = chosen["eps_filed"]
+    revenue_tag = chosen["revenue_tag"]
+    eps_tag = chosen["eps_tag"]
+    period_end = chosen["period_end"]
+
+    classification = classify_growth(
+        revenue_growth,
         eps_growth,
         eps_state,
-        eps_period,
-        eps_filed,
-    ) = _eps_quarter_yoy(
-        eps_q,
-        fiscal_year,
-        quarter,
     )
 
-    # -------------------------------------------------------------------------
-    # CLASSIFICAÇÃO
-    # -------------------------------------------------------------------------
-
-    classification = (
-        classify_growth(
-            revenue_growth,
-            eps_growth,
-            eps_state,
-        )
-    )
-
-    period_end = None
-
-    periods = [
-        x
-        for x in [
-            revenue_period,
-            eps_period,
-        ]
-        if x is not None
-    ]
-
-    if periods:
-
-        period_end = min(
-            periods
-        )
-
-    if period_end is not None:
-
-        if as_of_date is None:
-            ref_date = pd.Timestamp.utcnow()
-            if ref_date.tzinfo is not None:
-                ref_date = ref_date.tz_localize(None)
-            ref_date = ref_date.normalize()
-        else:
-            ref_date = pd.Timestamp(as_of_date)
-            if ref_date.tzinfo is not None:
-                ref_date = ref_date.tz_localize(None)
-            ref_date = ref_date.normalize()
-
-        fundamental_age_days = (
-            ref_date - pd.Timestamp(period_end).normalize()
-        ).days
-
+    if as_of_date is None:
+        ref_date = pd.Timestamp.utcnow()
+        if ref_date.tzinfo is not None:
+            ref_date = ref_date.tz_localize(None)
+        ref_date = ref_date.normalize()
     else:
-        fundamental_age_days = np.nan
+        ref_date = pd.Timestamp(as_of_date)
+        if ref_date.tzinfo is not None:
+            ref_date = ref_date.tz_localize(None)
+        ref_date = ref_date.normalize()
+
+    fundamental_age_days = (
+        ref_date
+        - pd.Timestamp(period_end).normalize()
+    ).days
 
     fundamental_recent = (
-        pd.notna(fundamental_age_days)
-        and 0 <= fundamental_age_days <= MAX_FUNDAMENTAL_AGE_DAYS
+        0
+        <= fundamental_age_days
+        <= MAX_FUNDAMENTAL_AGE_DAYS
     )
 
-    # Fail-safe adicional: fundamentos velhos nunca podem ser aprovados.
+    # Fail-safe: nunca aprovar fundamento velho.
     if not fundamental_recent:
         classification = "SEM_DADOS"
 
     return {
-        "ticker":
-            ticker,
-
-        "cik":
-            cik,
-
-        "revenue_yoy":
-            revenue_growth,
-
-        "eps_growth_yoy":
-            eps_growth,
-
-        "eps_state":
-            eps_state,
-
-        "fiscal_year":
-            fiscal_year,
-
-        "fiscal_quarter":
-            quarter,
-
-        "period_end":
-            period_end,
-
-        "revenue_filed":
-            revenue_filed,
-
-        "eps_filed":
-            eps_filed,
-
-        "revenue_tag":
-            revenue_tag,
-
-        "eps_tag":
-            eps_tag,
-
-        "fundamental_age_days":
-            fundamental_age_days,
-
-        "fundamental_recent":
-            bool(fundamental_recent),
-
-        "growth_class":
-            classification,
-
-        "fundamentals_ok":
-            (
-                classification
-                ==
-                "CRESCIMENTO_FORTE"
-            ),
+        "ticker": ticker,
+        "cik": cik,
+        "revenue_yoy": revenue_growth,
+        "eps_growth_yoy": eps_growth,
+        "eps_state": eps_state,
+        "fiscal_year": fiscal_year,
+        "fiscal_quarter": quarter,
+        "period_end": period_end,
+        "revenue_filed": revenue_filed,
+        "eps_filed": eps_filed,
+        "revenue_tag": revenue_tag,
+        "eps_tag": eps_tag,
+        "fundamental_age_days": fundamental_age_days,
+        "fundamental_recent": bool(fundamental_recent),
+        "growth_class": classification,
+        "fundamentals_ok": (
+            classification
+            ==
+            "CRESCIMENTO_FORTE"
+        ),
     }
 
 
