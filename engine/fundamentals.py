@@ -82,6 +82,7 @@ MAX_FUNDAMENTAL_AGE_DAYS = 400
 # =============================================================================
 
 REVENUE_TAGS = [
+    # Broad/current revenue concepts
     "RevenueFromContractWithCustomerExcludingAssessedTax",
     "RevenueFromContractWithCustomerIncludingAssessedTax",
     "SalesRevenueNet",
@@ -90,7 +91,18 @@ REVENUE_TAGS = [
     "Revenues",
     "OperatingRevenues",
     "TotalRevenuesAndOtherIncome",
+
+    # Financial institutions / payment networks
     "InterestAndDividendIncomeOperating",
+    "InterestIncomeExpenseNonoperatingNet",
+    "NoninterestIncome",
+    "InvestmentBankingRevenue",
+    "CreditCardRevenue",
+
+    # Energy / commodity businesses
+    "SalesRevenueEnergyServices",
+    "SalesRevenueOilAndGas",
+    "OilAndGasRevenue",
 ]
 
 EPS_TAGS = [
@@ -1828,11 +1840,13 @@ def analyze_fundamentals(
 if __name__ == "__main__":
 
     TEST_TICKERS = [
+        "ORCL",
+        "V",
+        "JPM",
+        "XOM",
         "AAPL",
         "MSFT",
         "NVDA",
-        "AMZN",
-        "MU",
     ]
 
     fundamentals = (
