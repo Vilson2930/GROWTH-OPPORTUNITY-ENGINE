@@ -168,17 +168,29 @@ def update_history(
 
         history = table
 
+    # -------------------------------------------------------------------------
+    # PRESERVAR O FORWARD TEST
+    #
+    # Cada execução deve permanecer auditável no histórico.
+    # Não deduplicamos mais por ticker + date + signal, pois isso apagava
+    # execuções repetidas do mesmo pregão e do mesmo sinal.
+    #
+    # Mantemos apenas uma proteção contra duplicação exata da mesma execução,
+    # usando run_timestamp quando disponível.
+    # -------------------------------------------------------------------------
+
     dedupe_cols = [
         col
         for col in [
             "ticker",
             "date",
             "signal",
+            "run_timestamp",
         ]
         if col in history.columns
     ]
 
-    if dedupe_cols:
+    if len(dedupe_cols) == 4:
 
         history = history.drop_duplicates(
             subset=dedupe_cols,
