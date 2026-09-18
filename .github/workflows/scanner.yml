@@ -52,6 +52,7 @@ jobs:
         run: |
           mkdir -p data
           mkdir -p output
+          mkdir -p outputs
 
       # ============================================================
       # 5. EXECUTAR ENGINE
@@ -72,11 +73,15 @@ jobs:
           ls -lah output || true
 
           echo ""
+          echo "===== OUTPUTS - INVESTMENT CIO ====="
+          ls -lah outputs || true
+
+          echo ""
           echo "===== DATA ====="
           ls -lah data || true
 
       # ============================================================
-      # 7. VALIDAR RESULTADOS
+      # 7. VALIDAR RESULTADOS ORIGINAIS
       # ============================================================
 
       - name: Validate output
@@ -94,7 +99,272 @@ jobs:
           echo "Arquivos principais validados."
 
       # ============================================================
-      # 8. ENVIAR RELATÓRIO POR E-MAIL
+      # 8. VALIDAR OUTPUT PARA INVESTMENT CIO AGENT
+      # ============================================================
+
+      - name: Validate Investment CIO output
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+
+          path = Path("outputs/agent_output_raw.json")
+
+          if not path.exists():
+              raise SystemExit(
+                  "ERRO: outputs/agent_output_raw.json não foi gerado."
+              )
+
+          with path.open(
+              "r",
+              encoding="utf-8",
+          ) as file:
+              payload = json.load(file)
+
+          if payload.get("source_system") != "GROWTH_OPPORTUNITY_ENGINE":
+              raise SystemExit(
+                  "ERRO: source_system inválido."
+              )
+
+          if payload.get("export_version") != "1.0":
+              raise SystemExit(
+                  "ERRO: export_version inválido."
+              )
+
+          summary = payload.get("summary")
+
+          if not isinstance(summary, dict):
+              raise SystemExit(
+                  "ERRO: summary ausente ou inválido."
+              )
+
+          strategy = payload.get("strategy")
+
+          if not isinstance(strategy, list):
+              raise SystemExit(
+                  "ERRO: strategy ausente ou inválido."
+              )
+
+          signals = payload.get("signals")
+
+          if not isinstance(signals, list):
+              raise SystemExit(
+                  "ERRO: signals ausente ou inválido."
+              )
+
+          fundamentals = payload.get("fundamentals")
+
+          if not isinstance(fundamentals, list):
+              raise SystemExit(
+                  "ERRO: fundamentals ausente ou inválido."
+              )
+
+          institutional = payload.get("institutional")
+
+          if not isinstance(institutional, list):
+              raise SystemExit(
+                  "ERRO: institutional ausente ou inválido."
+              )
+
+          if len(strategy) == 0:
+              raise SystemExit(
+                  "ERRO: strategy está vazio."
+              )
+
+          required_strategy_fields = {
+              "ticker",
+              "signal",
+              "falling_score",
+              "confirmations_total",
+          }
+
+          for index, row in enumerate(strategy):
+
+              if not isinstance(row, dict):
+                  raise SystemExit(
+                      f"ERRO: strategy[{index}] não é objeto."
+                  )
+
+              missing = (
+                  required_strategy_fields
+                  - set(row.keys())
+              )
+
+              if missing:
+                  raise SystemExit(
+                      "ERRO: campos ausentes em "
+                      f"strategy[{index}]: "
+                      + ", ".join(sorted(missing))
+                  )
+
+          allowed_signals = {
+              "ENTRADA_FORTE",
+              "ENTRADA_PARCIAL",
+              "AGUARDAR",
+          }
+
+          found_signals = {
+              row.get("signal")
+              for row in strategy
+          }
+
+          invalid_signals = (
+              found_signals
+              - allowed_signals
+          )
+
+          if invalid_signals:
+              raise SystemExit(
+                  "ERRO: sinais desconhecidos: "
+                  + ", ".join(
+                      sorted(
+                          str(value)
+                          for value
+                          in invalid_signals
+                      )
+                  )
+              )
+
+          expected_strategy_count = (
+              summary.get("strategy_count")
+          )
+
+          if expected_strategy_count != len(strategy):
+              raise SystemExit(
+                  "ERRO: strategy_count não corresponde "
+                  "ao tamanho real de strategy."
+              )
+
+          expected_signals_count = (
+              summary.get("signals_count")
+          )
+
+          if expected_signals_count != len(signals):
+              raise SystemExit(
+                  "ERRO: signals_count não corresponde "
+                  "ao tamanho real de signals."
+              )
+
+          metadata = payload.get("metadata", {})
+
+          export_policy = metadata.get(
+              "export_policy",
+              {},
+          )
+
+          protected_flags = [
+              "recalculates_market_indicators",
+              "recalculates_fundamentals",
+              "recalculates_institutional_score",
+              "recalculates_pullback",
+              "recalculates_falling_score",
+              "recalculates_confirmations",
+              "recalculates_signals",
+              "reclassifies_signals",
+              "recalculates_ranking",
+              "reorders_ranking",
+              "recalculates_weights",
+              "changes_capital_plan",
+              "changes_confirmation_state",
+              "removes_waiting_opportunities",
+              "creates_new_investment_signal",
+              "executes_broker_orders",
+          ]
+
+          for flag in protected_flags:
+
+              if export_policy.get(flag) is not False:
+                  raise SystemExit(
+                      f"ERRO: política de exportação inválida: {flag}"
+                  )
+
+          signal_counts = {}
+
+          for row in strategy:
+
+              signal = row.get("signal")
+
+              signal_counts[signal] = (
+                  signal_counts.get(
+                      signal,
+                      0,
+                  )
+                  + 1
+              )
+
+          if signal_counts != summary.get(
+              "signal_counts",
+              {},
+          ):
+              raise SystemExit(
+                  "ERRO: distribuição de sinais "
+                  "não corresponde ao summary."
+              )
+
+          print(
+              "Growth Opportunity Engine "
+              "— output para Investment CIO validado."
+          )
+
+          print(
+              "Source system:",
+              payload["source_system"],
+          )
+
+          print(
+              "Export version:",
+              payload["export_version"],
+          )
+
+          print(
+              "Empresas na estratégia:",
+              len(strategy),
+          )
+
+          print(
+              "Sinais:",
+              signal_counts,
+          )
+
+          print(
+              "Na zona de pullback:",
+              summary.get(
+                  "pullback_zone_count"
+              ),
+          )
+
+          print(
+              "Confirmações executadas:",
+              summary.get(
+                  "confirmation_executed_count"
+              ),
+          )
+
+          print(
+              "Peso inicial agregado:",
+              summary.get(
+                  "initial_weight_sum"
+              ),
+          )
+
+          print(
+              "Peso efetivo agregado:",
+              summary.get(
+                  "effective_weight_sum"
+              ),
+          )
+
+          print(
+              "Caixa agregado:",
+              summary.get(
+                  "current_cash_weight_sum"
+              ),
+          )
+          PY
+
+      # ============================================================
+      # 9. ENVIAR RELATÓRIO POR E-MAIL
       # ============================================================
 
       - name: Send report by email
@@ -108,7 +378,7 @@ jobs:
           python send_email.py
 
       # ============================================================
-      # 9. SALVAR COMO ARTIFACT
+      # 10. SALVAR RELATÓRIO ORIGINAL COMO ARTIFACT
       # ============================================================
 
       - name: Upload report artifact
@@ -121,7 +391,19 @@ jobs:
           retention-days: 30
 
       # ============================================================
-      # 10. ATUALIZAR HISTÓRICO NO REPOSITÓRIO
+      # 11. SALVAR OUTPUT PARA INVESTMENT CIO AGENT
+      # ============================================================
+
+      - name: Upload Investment CIO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: growth-opportunity-agent-output
+          path: outputs/agent_output_raw.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # ============================================================
+      # 12. ATUALIZAR HISTÓRICO NO REPOSITÓRIO
       # ============================================================
 
       - name: Commit history
