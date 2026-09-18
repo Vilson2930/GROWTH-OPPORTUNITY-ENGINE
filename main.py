@@ -56,6 +56,10 @@ from engine.report import (
     build_text_summary,
 )
 
+from agent_export import (
+    export_agent_output,
+)
+
 
 # =============================================================================
 # 1. CABEÇALHO
@@ -555,7 +559,23 @@ def main():
 
     try:
 
-        run_engine()
+        results = run_engine()
+
+        # =====================================================================
+        # EXPORTAÇÃO PARA O INVESTMENT CIO AGENT
+        # =====================================================================
+        #
+        # O exportador apenas serializa os resultados finais produzidos
+        # pelo motor. Não recalcula indicadores, sinais, ranking ou pesos.
+        #
+        export_agent_output(
+            market_data=results["market_data"],
+            fundamentals=results["fundamentals"],
+            institutional=results["institutional"],
+            signals=results["signals"],
+            strategy=results["strategy"],
+            outputs=results["outputs"],
+        )
 
         return 0
 
